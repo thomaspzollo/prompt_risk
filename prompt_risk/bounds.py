@@ -18,19 +18,6 @@ from typing import Callable
 import numpy.typing as npt
 
 
-# def get_bound(n, c, *, k=0):
-#     i = np.arange(1, n + 1)
-#     b = scipy.special.betaincinv(i, n - i + 1, c)
-#     b[:k] = 0.0
-#     return b
-
-# def berk_jones_bound(n, delta, *, k=0):
-#     def f(c):
-#         return crossprob.ecdf1_new_b(get_bound(n, c, k=k)) - (1 - delta)
-    
-#     return get_bound(n, scipy.optimize.bisect(f, 0.0, 1.0), k=k)
-
-
 def mean_quantile_weight(p):
     return 1.0
 
