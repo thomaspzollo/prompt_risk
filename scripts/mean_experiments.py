@@ -77,7 +77,7 @@ def main(args):
 
         rand_idx = torch.randperm(loss.shape[1])
         train_idx = rand_idx[:args.num_val_datapoints]
-        test_idx = rand_idx[:args.num_val_datapoints]
+        test_idx = rand_idx[args.num_val_datapoints:]
         
         X = torch.Tensor(loss[:, train_idx])
         X_test = torch.Tensor(loss[:, test_idx])
