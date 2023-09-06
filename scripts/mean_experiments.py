@@ -63,6 +63,7 @@ def main(args):
     ]
 
     instructions, loss = load_loss(args)
+    args.num_hypotheses = loss.shape[0]
 
     print("loss shape", loss.shape)
 
@@ -76,7 +77,7 @@ def main(args):
 
         rand_idx = torch.randperm(loss.shape[1])
         train_idx = rand_idx[:args.num_val_datapoints]
-        test_idx = rand_idx[:args.num_val_datapoints]
+        test_idx = rand_idx[args.num_val_datapoints:]
         
         X = torch.Tensor(loss[:, train_idx])
         X_test = torch.Tensor(loss[:, test_idx])
@@ -141,21 +142,15 @@ if __name__ == "__main__":
         help="random seed (default: 0)"
     )
     parser.add_argument(
-        "--num_hypotheses",
-        type=int,
-        default=50,
-        help="number of hypotheses (default: 500)",
-    )
-    parser.add_argument(
         "--num_trials",
         type=int,
-        default=10,
+        default=100,
         help="number of random splits (default: 1000)",
     )
     parser.add_argument(
         "--num_val_datapoints",
         type=int,
-        default=500,
+        default=1000,
         help="number of validation points",
     )
     parser.add_argument(
