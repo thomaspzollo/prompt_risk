@@ -1,0 +1,14 @@
+-e .
+torch
+scipy
+numpy
+matplotlib
+requests
+docker
+transformers
+text-generation
+gpustat
+evaluate
+datasets
+detoxify
+bert_score

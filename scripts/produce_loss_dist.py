@@ -1,3 +1,23 @@
+"""This module produces loss scores for the specified dataset and loss function.
+
+Note that if you're using the text-generation-inference server, you should reserve
+a GPU for the evaluation models (e.g. BERTScore, Detoxify, etc.) to avoid memory issues.
+
+Examples:
+    $ python -m scripts.produce_loss_dist \
+        --dataset red_team_chat \
+        --use_tgi \
+        --model-name-or-path meta-llama/Llama-2-7b-hf \
+        --num-gpus 1 \
+        --server-port 8081 \
+        --dtype bfloat16 \
+        --print-container-logs \
+        --device cuda:1 \
+        --max-new-tokens 20 \
+        --n_total 101 \
+        --num_hypotheses 2 \
+        --loss_fn toxicity
+"""
 import argparse
 from argparse import Namespace
 import random
@@ -15,6 +35,8 @@ from transformers import pipeline
 from transformers import AutoModelForSeq2SeqLM, AutoModelForCausalLM, AutoTokenizer
 from detoxify import Detoxify
 
+from tgi.call_server import get_batch_size, make_predictions
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from prompt_risk.utils import *
@@ -22,6 +44,8 @@ from prompt_risk.bounds import *
 from prompt_risk.instructions import instruction_sets
 
 from text_generation import Client
+from tgi.docker_utils import server_live, set_hf_token, start_server, stop_server
+from tgi.args import parse_args
 
 
 def get_instructions(args, instruction_sets):
@@ -43,7 +67,6 @@ def set_seeds(random_seed):
 
 
 def get_chat_model(args):
-
     if args.dataset in ["med_sum", "chat_doctor_sum"]:
         model_name = "GanjinZero/biobart-large"
         # model_name = "microsoft/biogpt"
@@ -66,9 +89,6 @@ def get_chat_model(args):
     chat_model.eval()
     print("chat model loaded")
     return chat_model, chat_tokenizer
-
-
-
 
 
 def get_instruction_root(args, instruction):
@@ -98,7 +118,7 @@ def get_data(args, ins_root):
     elif args.dataset == "full_chat":
         dataset = load_dataset("Anthropic/hh-rlhf")["test"]
         def prepend(batch):
-            batch["text"] = [ins_root + t.split("Human: ")[1].split("\n")[0] + " \nChatbot Response: " for t in batch["rejected"]]
+            batch["text"] = [ins_root + t.split("Human: ")[1].split("\n")[0] + " \nChatbot Response:" for t in batch["rejected"]]
             return batch
     
         dataset = dataset.map(prepend, batched=True)
@@ -108,7 +128,7 @@ def get_data(args, ins_root):
 
         dataset = load_dataset("Anthropic/hh-rlhf", data_dir="red-team-attempts")
         def prepend(batch):
-            batch["text"] = [ins_root + t.split("Human: ")[1].split("\n")[0] + " \nChatbot Response: " for t in batch["transcript"]]
+            batch["text"] = [ins_root + t.split("Human: ")[1].split("\n")[0] + " \nChatbot Response:" for t in batch["transcript"]]
             return batch
             
         dataset = dataset.map(prepend, batched=True)
@@ -187,7 +207,8 @@ def get_scores(args, scorer, chat_out, batch):
         scores = scorer.compute(
             predictions=chat_out, 
             references=refs, 
-            lang="en"
+            lang="en",
+            device=args.device,
         )["f1"]
         scores = list(1-np.array(scores))
         scores = list(scores)
@@ -236,7 +257,7 @@ def scoring_pipeline(
     scorer = get_scorer(args)
     res = []
 
-    for instruction in instructions:
+    for instruction in tqdm(instructions, desc="instructions"):
 
         set_seeds(args.random_seed)
         ins_root = get_instruction_root(args, instruction)
@@ -248,18 +269,17 @@ def scoring_pipeline(
             query_texts = []
             chat_responses = []
 
-        client = Client("http://0.0.0.0:8080")
-        
         with torch.no_grad():
-    
+            text_examples = []
             for batch_idx, batch in enumerate(tqdm(dataloader, total=int(np.ceil(args.n_total/args.batch_size)))):
-
                 if ("sum" in args.dataset) or (args.dataset == "healthcare"):
                     text = batch["text"]
                 elif ("pubmed" in args.dataset):
                     text = [t.split("$")[0] for t in batch]
                 elif "chat" in args.dataset:
                     text = batch
+                # collect all text examples for the TGI server          
+                text_examples.extend(text)
 
                 # print(text)
 
@@ -267,8 +287,9 @@ def scoring_pipeline(
                     print(text[0])
                     print()
 
-                if args.model_size != "xl":
-
+                if args.use_tgi:
+                    continue
+                elif args.model_size != "xl":
                     inputs = chat_tokenizer(
                         text, 
                         padding=True, #(args.dataset != "med_sum"), 
@@ -286,12 +307,28 @@ def scoring_pipeline(
                         outputs, 
                         skip_special_tokens=True
                     )
+                    scores = get_scores(args, scorer, chat_out, batch)
+                    X.extend(scores)
 
-                else:
+                    if args.with_text:
+                        query_texts.extend(text)
+                        chat_responses.extend(chat_out)
 
-                    chat_out = [client.generate(t, max_new_tokens=args.max_gen_len).generated_text for t in text]
-                    # chat_out = client.generate(text, max_new_tokens=50).generated_text
-
+                    if len(X) > args.n_total:
+                        break
+        
+        if args.use_tgi:
+            # process text examples with the TGI server
+            df = make_predictions(text_examples[:args.n_total], args, num_threads=args.max_batch_size)
+            # get the scores in batches
+            for batch_idx, batch in enumerate(tqdm(dataloader, total=int(np.ceil(args.n_total/args.batch_size)))):
+                # get the generated text for this batch
+                chat_out = df["generated_text"].iloc[batch_idx*args.batch_size:(batch_idx+1)*args.batch_size].tolist()
+                if chat_out == []:
+                    # we've already processed all the text examples
+                    # TODO: determine if this causes issues for datasets/losses other than
+                    # red_team_chat + toxicity
+                    break
                 scores = get_scores(args, scorer, chat_out, batch)
                 X.extend(scores)
 
@@ -301,7 +338,7 @@ def scoring_pipeline(
 
                 if len(X) > args.n_total:
                     break
-                    
+        
         X = np.array(X)
     
         print("X", X.shape)
@@ -325,7 +362,9 @@ def scoring_pipeline(
   
 
 def main(args):
-
+    # set HF token to ensure access to llama 2 models
+    set_hf_token()
+    
     args.save_results = not args.no_save
     
     print(args, "\n")
@@ -334,16 +373,22 @@ def main(args):
 
     set_seeds(args.random_seed)
 
-    if args.model_size != "xl":
+    chat_model = None
+    chat_tokenizer = None
+    if args.use_tgi:
+        # start the text-generation-inference server with the specified model
+        container = start_server(args)
+        # get the max batch size
+        args.max_batch_size = get_batch_size(container, args.max_total_tokens)
+    elif args.model_size != "xl":
         chat_model, chat_tokenizer = get_chat_model(args)
     else:
         chat_model = None
         model_name = "google/flan-t5-{}".format(args.model_size)
         chat_tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    save_folder = "../output/{}".format(
-        args.dataset, 
-    )
+    save_folder = os.path.join(args.output_dir, args.dataset)
+
     os.makedirs(save_folder, exist_ok=True)
     if args.with_text:
         save_root = "{}/{}_model_{}_{}_loss_dist_with_text.pkl".format(
@@ -372,11 +417,13 @@ def main(args):
         print("saving final result to", args.save_root)
         with open(args.save_root, 'wb') as file:
             pkl.dump(res, file)
+    
+    if args.use_tgi:
+        # stop the server
+        stop_server(container)
 
 if __name__ == "__main__":
-    
     parser = argparse.ArgumentParser(description="Produce loss distribution")
-
     parser.add_argument(
         "--random_seed", 
         type=int, 
@@ -405,6 +452,7 @@ if __name__ == "__main__":
         default="xsum",
         help="dataset for experiments"
     )
+    parser.add_argument('--use_tgi', action='store_true', default=False, help='Use the text-generation-inference server to serve the model.')
     parser.add_argument(
         "--model_size",
         default="base",
@@ -441,6 +489,16 @@ if __name__ == "__main__":
         "--no_save",
         action="store_true",
     )
-
-    args = parser.parse_args()
+    parser.add_argument('--output_dir', type=str, default='./output', help='Output directory')
+    # merge the Docker/TGI args with the main args
+    args, unknown = parser.parse_known_args()
+    docker_args, remaining_unknown = parse_args(unknown, known_only=True)
+    # check if there are any remaining unknown args
+    if remaining_unknown:
+        raise argparse.ArgumentError(None, f'Unknown arguments: {remaining_unknown}')
+    
+    # merge the two args objects
+    args = vars(args)
+    args.update(vars(docker_args))
+    args = Namespace(**args)
     main(args)
