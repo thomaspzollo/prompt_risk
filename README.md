@@ -42,7 +42,8 @@ Install Docker with NVIDIA support, if necessary, following the instructions [he
 ```
 HUGGING_FACE_HUB_TOKEN=$(cat ~/.cache/huggingface/token)
 model=meta-llama/Llama-2-7b-hf
-num_shard=1
+model=google/flan-t5-xxl
+num_shard=4
 volume=$PWD/data
 docker run \
     --gpus all \
@@ -53,57 +54,22 @@ docker run \
     ghcr.io/huggingface/text-generation-inference:latest \
         --model-id $model \
         --num-shard $num_shard \
-        --max-input-length 2048 \
-        --max-total-tokens 4096 \
-        --dtype bfloat16
+        --max-input-length 512 \
+        --max-total-tokens 1024 \
+        --dtype float16
 ```
 
-## Benchmark to maximize throughput
-Install the tool locally (this is probably easier than having to build a Docker Compose file).
+## Make predictions
 ```bash
-git clone git@github.com:huggingface/text-generation-inference.git
-cd text-generation-inference
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-PROTOC_ZIP=protoc-21.12-linux-x86_64.zip
-curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v21.12/$PROTOC_ZIP
-sudo unzip -o $PROTOC_ZIP -d /usr/local bin/protoc
-sudo unzip -o $PROTOC_ZIP -d /usr/local 'include/*'
-rm -f $PROTOC_ZIP
-
-sudo apt-get install libssl-dev gcc -y
-
-conda create -n text-generation-inference python=3.11
-conda activate text-generation-inference
-BUILD_EXTENSIONS=True make install
-
+nohup python -u -m scripts.generate_outputs \
+    --datasets red_team_chat full_chat \
+    --use_tgi \
+    --model-name-or-path google/flan-t5-xxl \
+    --num-gpus 4 \
+    --server-port 8081 \
+    --dtype float16 \
+    --print-container-logs \
+    --n_total 2000 \
+    --num_hypotheses 50 \
+> generate_outputs.log 2>&1 &
 ```
-```bash
-model=bigscience/bloom-560m
-num_shard=1
-volume=$PWD/data
-docker run \
-    --gpus all \
-    --shm-size 1g \
-    -p 8081:80 \
-    -v $volume:/data \
-    ghcr.io/huggingface/text-generation-inference:latest \
-        --model-id $model \
-        --num-shard $num_shard
-```
-
-Now run the benchmarking tool:
-```bash
-model=bigscience/bloom-560m
-num_shard=1
-volume=$PWD/data
-docker run \
-    -v $volume:/data \
-    --entrypoint text-generation-benchmark \
-    ghcr.io/huggingface/text-generation-inference:latest \
-        --tokenizer-name bigscience/bloom-560m
-```
---gpus all \
-    --shm-size 1g \
-    -p 8081:80 \
-    -v $volume:/data \

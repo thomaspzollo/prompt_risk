@@ -165,7 +165,7 @@ def make_predictions(text_examples, args, num_threads=2):
         df = df.sort_values(by='id').reset_index(drop=True)
     return df
 
-def get_batch_size(container, max_total_tokens):
+def get_batch_size(container, max_total_tokens, max_concurrent_requests=128):
     # parse container logs to determine how many tokens we can support concurrently
     # then set the batch size accordingly
     logs = container.logs(stream=False).decode('utf-8')
@@ -174,11 +174,11 @@ def get_batch_size(container, max_total_tokens):
     line = [line for line in logs.split('\n') if search_string in line][0]
     max_batch_total_tokens = int(line.split(search_string)[1])
     max_batch_size = max_batch_total_tokens // max_total_tokens
-    # model can only handle 128 concurrent requests
-    if max_batch_size > 128:
-        print(f"Warning: max batch size of {max_batch_size:,} is too large. Setting to 128.")
+    # model can only handle 128 concurrent requests by default
+    if max_batch_size > max_concurrent_requests:
+        print(f"Warning: max batch size of {max_batch_size:,} is too large. Setting to {max_concurrent_requests}.")
         print(f"Consider increasing the maximum number of concurrent requests in the TGI server.")
-        max_batch_size = 128
+        max_batch_size = max_concurrent_requests
     print(f"Setting max batch size to {max_batch_size:,} based on max batch total tokens of {max_batch_total_tokens:,} and input length of {max_total_tokens:,}.")
     return max_batch_size
 

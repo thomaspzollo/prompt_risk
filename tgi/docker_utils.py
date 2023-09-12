@@ -62,6 +62,10 @@ def start_server(args):
     # user can specify up to max_new_tokens = max_total_tokens - max_input_length in their request
     command.extend(["--max-input-length", str(args.max_input_length)])
     command.extend(["--max-total-tokens", str(args.max_total_tokens)])
+    if 'max_batch_total_tokens' in args:
+        command.extend(["--max-batch-total-tokens", str(args.max_batch_total_tokens)])
+    if 'max_concurrent_requests' in args:
+        command.extend(["--max-concurrent-requests", str(args.max_concurrent_requests)])
     model_id_clean = model_id.replace("/", "-")
     container_name = f"text-generation-inference-{model_id_clean}-{num_shard}"
     if args.container_quantize:

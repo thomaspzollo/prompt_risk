@@ -4,18 +4,16 @@ Note that if you're using the text-generation-inference server, you should reser
 a GPU for the evaluation models (e.g. BERTScore, Detoxify, etc.) to avoid memory issues.
 
 Examples:
-    $ python -m scripts.produce_loss_dist \
-        --dataset full_chat \
+    $ python -m scripts.generate_outputs \
+        --datasets red_team_chat full_chat \
         --use_tgi \
-        --model-name-or-path google/flan-t5-xl \
-        --num-gpus 1 \
+        --model-name-or-path google/flan-t5-xxl \
+        --num-gpus 4 \
         --server-port 8081 \
         --dtype float16 \
         --print-container-logs \
-        --device cuda:1 \
-        --max-new-tokens 1024 \
-        --n_total 20 \
-        --num_hypotheses 2
+        --n_total 2000 \
+        --num_hypotheses 50
 """
 import argparse
 from argparse import Namespace
@@ -49,8 +47,7 @@ from tgi.args import parse_args
 
 
 def get_instructions(args, instruction_sets):
-
-    if args.dataset in ["xsum"]:
+    if args.dataset in ["xsum", "sumedh/MeQSum"]:
         return instruction_sets["summarization"]
     elif args.dataset in ["red_team_chat", "full_chat"]:
         return instruction_sets["chat"]
@@ -92,8 +89,7 @@ def get_chat_model(args):
 
 
 def get_instruction_root(args, instruction):
-
-    if args.dataset in ["xsum"]:
+    if args.dataset in ["xsum", "sumedh/MeQSum"]:
         ins_root = "Your goal is to summarize a document. " + instruction + " Summarize the following document: \nDocument: "
     elif args.dataset in ["red_team_chat", "full_chat"]:
         ins_root = instruction + "\nHere is a human input: "
@@ -131,7 +127,7 @@ def get_data(args, ins_root):
 
         dataset = dataset.map(prepend, batched=True)
         dataset = dataset.with_format("torch")["train"]["text"]
-
+        
     elif args.dataset == "pubmed_qa":
         dataset = load_dataset("pubmed_qa", "pqa_artificial")["train"]
         def prepend(batch):
@@ -157,6 +153,21 @@ def get_data(args, ins_root):
 
         dataset = dataset.map(prepend, batched=True)
         dataset = dataset.with_format("torch")["text"]
+    
+    elif args.dataset == "sumedh/MeQSum":
+        # TODO: parse this with an excel parser
+        dataset = load_dataset("sumedh/MeQSum")["train"]
+        def prepend(batch):
+            data = dict()
+            data["text"] = [
+                (ins_root + b + "\nProvide a detailed response in one paragraph: ")
+                for b in batch["input"]
+            ]
+            data["output"] = batch["output"]
+            return data
+        dataset = dataset.map(prepend, batched=True)
+        dataset = dataset.with_format("torch")["text"]
+
 
     dataloader = DataLoader(
         dataset,
@@ -266,7 +277,8 @@ def get_datasets_dataloaders(instructions, cache_df, args, return_dataloaders=Fa
             dataset = sorted(list(unique))
         
         # clip to requested number of examples
-        dataset = dataset[:args.n_total]
+        dataset_slice = slice(0, args.n_total)
+        dataset = dataset[dataset_slice]
         
         # check if any of the text examples + instruction have already been processed
         # if so, remove them from the list
@@ -420,78 +432,82 @@ def main(args):
     if not args.datasets:
         args.datasets = [args.dataset]
 
+    # TODO: add support for multiple models
+    container = None
+    for dataset_ in args.datasets:
+        args.dataset = dataset_
+        # define output folder and cache csv path
+        save_folder = os.path.join(args.output_dir, args.dataset)
+        os.makedirs(save_folder, exist_ok=True)
+        model_name = args.model_name_or_path.replace("/", "-")
+        csv_path = os.path.join(save_folder, f'{model_name}_predictions.csv')
 
-    # define output folder and cache csv path
-    save_folder = os.path.join(args.output_dir, args.dataset)
-    os.makedirs(save_folder, exist_ok=True)
-    model_name = args.model_name_or_path.replace("/", "-")
-    csv_path = os.path.join(save_folder, f'{model_name}_predictions.csv')
+        # load the cache
+        if os.path.exists(csv_path) and not args.no_cache:
+            # load the existing csv
+            cache_df = pd.read_csv(csv_path)
+        else:
+            cache_df = pd.DataFrame()
+        
+        # prepare the datasets
+        instructions = get_instructions(args, instruction_sets)[:args.num_hypotheses]
+        assert len(instructions) == args.num_hypotheses
+        # dataloaders might be useful if we need to run native PyTorch models
+        datasets, dataloaders = get_datasets_dataloaders(instructions, cache_df, args)
+        
+        # if all datasets are empty (i.e. all text examples have already been processed), exit
+        if all([len(d["text"]) == 0 for d in datasets]):
+            print(f"All {args.n_total} requested text examples have already been processed for dataset {args.dataset}")
+            continue
 
-    # load the cache
-    if os.path.exists(csv_path) and not args.no_cache:
-        # load the existing csv
-        cache_df = pd.read_csv(csv_path)
-    else:
-        cache_df = pd.DataFrame()
-    
-    # prepare the datasets
-    instructions = get_instructions(args, instruction_sets)[:args.num_hypotheses]
-    assert len(instructions) == args.num_hypotheses
-    # dataloaders might be useful if we need to run native PyTorch models
-    datasets, dataloaders = get_datasets_dataloaders(instructions, cache_df, args)
-    
-    # if all datasets are empty (i.e. all text examples have already been processed), exit
-    if all([len(d["text"]) == 0 for d in datasets]):
-        print("All text examples have already been processed. Exiting.")
-        exit(0)
+        # tokenize the dataset and check the token distribution
+        # so we can set the max input length and max total tokens appropriately
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+        # only retain datasets that have at least one text example
+        datasets = [d for d in datasets if len(d['text']) > 0]
+        # get max length of the dataset among all text examples
+        max_len = 0
+        for idx, d in enumerate(datasets):
+            sample_dataset = d['text']
+            tokenized = tokenizer(sample_dataset, padding=False, truncation=False,)
+            lens = [len(t) for t in tokenized['input_ids']]
+            desc_df = pd.DataFrame({'len': lens})
+            stats = desc_df.describe()
+            max_len = max(max_len, int(stats.loc['max', 'len']))
+            if idx == 0:
+                print(f'Token distribution for dataset {args.dataset}:')
+                print(stats)
+        print(f"Max length across all prompts in datasets: {max_len}")
+        # set max_input_tokens to max length + 100 to account for special tokens and any variation in prompts
+        args.max_input_length = max_len + 100
+        # set max_total_tokens min of 3x max_input_tokens and 4096
+        args.max_total_tokens = min(args.max_input_length * 3, 4096)
+        args.max_new_tokens = args.max_total_tokens - args.max_input_length
+        print(f"Max input length: {args.max_input_length}")
+        print(f"Max total tokens: {args.max_total_tokens}")
 
-    if args.use_tgi:
-        # start the text-generation-inference server with the specified model
-        container = start_server(args)
-        # get the max batch size
-        args.max_batch_size = get_batch_size(container, args.max_total_tokens)
+        if args.use_tgi:
+            args.max_concurrent_requests = 128 # default
+            if 'flan-t5' in args.model_name_or_path:
+                # set max batch total tokens manually because TGI won't do it automatically for T5 models
+                # this was set somewhat experimentally
+                args.max_concurrent_requests = 200
+                args.max_batch_total_tokens = min(args.max_total_tokens*args.max_concurrent_requests, 50_000)
+            # start the text-generation-inference server with the specified model
+            container = start_server(args)
+            # get the max batch size
+            args.max_batch_size = get_batch_size(container, args.max_total_tokens, args.max_concurrent_requests)
 
-    # run predictions for all datasets
-    for dataset in datasets:
-        cache_df = tgi_prediction_pipeline(dataset, cache_df, args)
-        # save csv the predictions
-        cache_df.to_csv(csv_path, index=False)
+        # run predictions for all datasets
+        for dataset in datasets:
+            cache_df = tgi_prediction_pipeline(dataset, cache_df, args)
+            # save csv the predictions
+            cache_df.to_csv(csv_path, index=False)
 
-    if args.use_tgi:
-        # stop the server
-        stop_server(container)
-    
-    exit(0)
-
-
-
-    if args.with_text:
-        save_root = "{}/{}_model_{}_{}_loss_dist_with_text.pkl".format(
-            save_folder,
-            args.dataset,
-            args.model_size,
-            args.loss_fn
-        )
-    else:
-        save_root = "{}/{}_model_{}_{}_loss_dist.pkl".format(
-            save_folder,
-            args.dataset,
-            args.model_size,
-            args.loss_fn
-        )
-    args.save_root = save_root
-
-    res = scoring_pipeline(
-        chat_model,
-        chat_tokenizer,
-        instructions,
-        args
-    )
-
-    if args.save_results:
-        print("saving final result to", args.save_root)
-        with open(args.save_root, 'wb') as file:
-            pkl.dump(res, file)
+        # stop the server so we can reconfigure it for the next dataset
+        if args.use_tgi:
+            # stop the server
+            stop_server(container)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Produce loss distribution")
@@ -510,7 +526,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_total",
         type=int,
-        default=2000,
+        default=None, # 2000 is a good number
         help="number of evaluated datapoints",
     )
     parser.add_argument(
