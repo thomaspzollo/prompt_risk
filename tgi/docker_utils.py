@@ -58,7 +58,7 @@ def start_server(args):
     logging.info(f"Starting server with model {model_id} and {num_shard} shard(s)")
     start = time.perf_counter()
     # arguments passed to the main entrypoint of the container: text-generation-inference
-    command = ["--model-id", model_id, "--num-shard", num_shard]
+    command = ["--model-id", model_id, "--num-shard", num_shard, "--dtype", args.dtype]
     # user can specify up to max_new_tokens = max_total_tokens - max_input_length in their request
     command.extend(["--max-input-length", str(args.max_input_length)])
     command.extend(["--max-total-tokens", str(args.max_total_tokens)])
@@ -103,7 +103,7 @@ def start_server(args):
         print(logs)
 
     # loop until server is ready
-    max_wait = 200
+    max_wait = 600 # may need quite a while to download the model
     total_wait = 0
     while total_wait < max_wait:
         server_is_live = server_live(args.host, args.server_port)
@@ -117,7 +117,13 @@ def start_server(args):
             if args.print_container_logs:
                 incremental_logs = new_logs.replace(logs, "")
                 print(incremental_logs)
-            logs = new_logs 
+            logs = new_logs
+
+            # check container status and exit if it failed to start
+            container.reload()
+            if container.status == "exited":
+                logging.error(f"Server {container_name} exited with status {container.status}")
+                raise RuntimeError(f"Server {container_name} exited with status {container.status}")
             time.sleep(10)
             total_wait += 10
     if total_wait >= max_wait:

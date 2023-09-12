@@ -87,14 +87,17 @@ def call_server_thread(queue, output_queue, generate_args, args):
         url = f'http://{args.host}:{args.server_port}'
         text, response_dict = call_server(text, url, return_response_dict=True, generate_args=generate_args)
         # TODO: if we get an error, we should add a little sleep and retry
+
+        response = {'id': example['id'], 'text': example['text'],}
+        response.update(response_dict)
         # pop the response_object because we can't serialize it
         response_object = response_dict.pop('response_object')
         # retrieve the finish reason
         finish_reason = response_object.details.finish_reason
-        response = {'id': example['id'], 'finish_reason': finish_reason}
-        response.update(response_dict)
+        response['finish_reason'] = finish_reason
         output_queue.put(response)
         queue.task_done()
+        
         # report on progress every 100 examples
         if example['id'] % 100 == 0:
             print(f"Index: {example['id']}\nGenerated: {response['generated_text']}")
@@ -146,9 +149,10 @@ def make_predictions(text_examples, args, num_threads=2):
         for t in threads:
             t.join()
     end = time.time()
-    print(
-        f"Completed {len(text_examples):,} examples in {end - start:,.2f} seconds. \
-            Time per example: {(end - start) / len(text_examples):.2f} seconds.")
+    if len(text_examples) > 0:
+        print(
+            f"Completed {len(text_examples):,} examples in {end - start:,.2f} seconds. \
+                Time per example: {(end - start) / len(text_examples):.2f} seconds.")
     
     # save the predictions
     predictions = []
@@ -157,7 +161,8 @@ def make_predictions(text_examples, args, num_threads=2):
 
     df = pd.DataFrame(predictions)
     # sort by the original index
-    df = df.sort_values(by='id')
+    if 'id' in df.columns:
+        df = df.sort_values(by='id').reset_index(drop=True)
     return df
 
 def get_batch_size(container, max_total_tokens):
