@@ -6,14 +6,14 @@ a GPU for the evaluation models (e.g. BERTScore, Detoxify, etc.) to avoid memory
 Examples:
     $ python -m scripts.generate_outputs \
         --datasets red_team_chat full_chat \
-        --use_tgi \
+        --use-tgi \
         --model-name-or-path google/flan-t5-xxl \
         --num-gpus 4 \
         --server-port 8081 \
         --dtype float16 \
         --print-container-logs \
-        --n_total 2000 \
-        --num_hypotheses 50
+        --n-total 2000 \
+        --num-hypotheses 50
 """
 import argparse
 from argparse import Namespace
@@ -31,7 +31,6 @@ from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 from transformers import pipeline, AutoModel, GPTJModel, GPTJConfig
 from transformers import AutoModelForSeq2SeqLM, AutoModelForSequenceClassification, AutoTokenizer
-from detoxify import Detoxify
 
 from tgi.call_server import get_batch_size, make_predictions
 
@@ -43,7 +42,8 @@ from prompt_risk.instructions import instruction_sets
 
 from text_generation import Client
 from tgi.docker_utils import server_live, set_hf_token, start_server, stop_server
-from tgi.args import parse_args
+from tgi.args import parse_args as tgi_parse_args
+from scripts.args import parse_args as scripts_parse_args
 
 
 def get_instructions(args, instruction_sets):
@@ -178,87 +178,6 @@ def get_data(args, ins_root):
     return dataset, dataloader
 
 
-def get_scorer(args):
-    if args.loss_fn == "bleu":
-        scorer = evaluate.load("bleu")
-    elif args.loss_fn == "bertscore":
-        scorer = evaluate.load("bertscore")
-    elif args.loss_fn == "rouge":
-        scorer = evaluate.load("rouge")
-    elif args.loss_fn == "toxicity":
-        scorer = Detoxify(device=args.device)
-    elif args.loss_fn == "accuracy":
-        scorer = None
-    elif args.loss_fn == "rlhf":
-        scorer = AutoModelForSequenceClassification.from_pretrained('OpenAssistant/reward-model-deberta-v3-large-v2')
-    else:
-        raise ValueError
-    return scorer
-
-
-def get_scores(args, scorer, chat_out, batch):
-
-    if args.loss_fn == "toxicity":
-        tox_out = scorer.predict(chat_out)
-        scores = torch.hstack([torch.Tensor(v).unsqueeze(1) for v in tox_out.values()])
-        scores = torch.max(scores,-1)[0].detach().cpu().tolist()
-
-    elif args.loss_fn == "bertscore":
-        if args.dataset == "healthcare":
-            refs = batch["output"]
-        else:
-            refs = batch["summary"]
-
-        for k in range(len(chat_out)):
-            print(k)
-            print()
-            print(refs[k])
-            print()
-            print(chat_out[k])
-            e += 7
-        scores = scorer.compute(
-            predictions=chat_out,
-            references=refs,
-            lang="en",
-            device=args.device,
-        )["f1"]
-        scores = list(1-np.array(scores))
-        scores = list(scores)
-
-    elif args.loss_fn == "rouge":
-        scores = scorer.compute(
-            predictions=chat_out,
-            references=batch["output"],
-            use_aggregator=False
-        )["rougeL"]
-        print(scores)
-        e += 7
-        scores = list(1-np.array(scores))
-        scores = list(scores)
-
-    elif args.loss_fn == "accuracy":
-
-        preds = [c.lower() for c in chat_out]
-        labels = [b.split("$")[1].lower() for b in batch]
-        assert len(preds) == len(labels)
-        # print(preds, labels)
-        scores = []
-        for i in range(len(labels)):
-
-            if preds[i] != labels[i]:
-                scores.append(1.0)
-            else:
-                scores.append(0.0)
-
-            if preds[i] not in ["yes", "no"]:
-                print("Warning, bad output:", preds[i])
-
-    else:
-        raise NotImplementedError
-
-    return scores
-
-
 def get_datasets_dataloaders(instructions, cache_df, args, return_dataloaders=False):
     datasets = []
     dataloaders = []
@@ -312,116 +231,9 @@ def tgi_prediction_pipeline(dataset, cache_df, args):
     cache_df = pd.concat([cache_df, df], ignore_index=True)
     return cache_df
 
-def scoring_pipeline(chat_model, chat_tokenizer, instructions, args):
-
-    scorer = get_scorer(args)
-    res = []
-
-    for instruction in tqdm(instructions, desc="instructions"):
-
-        set_seeds(args.random_seed)
-        ins_root = get_instruction_root(args, instruction)
-        dataset, dataloader = get_data(args, ins_root)
-
-        X = []
-
-        if args.with_text:
-            query_texts = []
-            chat_responses = []
-
-        with torch.no_grad():
-            text_examples = []
-            for batch_idx, batch in enumerate(tqdm(dataloader, total=int(np.ceil(args.n_total/args.batch_size)))):
-                if ("sum" in args.dataset) or (args.dataset == "healthcare"):
-                    text = batch["text"]
-                elif ("pubmed" in args.dataset):
-                    text = [t.split("$")[0] for t in batch]
-                elif "chat" in args.dataset:
-                    text = batch
-                # collect all text examples for the TGI server
-                text_examples.extend(text)
-
-                # print(text)
-
-                if batch_idx == 0:
-                    print(text[0])
-                    print()
-
-                if args.use_tgi:
-                    continue
-                elif args.model_size != "xl":
-                    inputs = chat_tokenizer(
-                        text,
-                        padding=True, #(args.dataset != "med_sum"), 
-                        truncation=True,
-                        return_tensors="pt",
-                        # device_map="auto"
-                    ).to("cuda")
-
-                    outputs = chat_model.generate(
-                        **inputs,
-                        max_length=args.max_gen_len
-                    )
-
-                    chat_out = chat_tokenizer.batch_decode(
-                        outputs,
-                        skip_special_tokens=True
-                    )
-                    scores = get_scores(args, scorer, chat_out, batch)
-                    X.extend(scores)
-
-                    if args.with_text:
-                        query_texts.extend(text)
-                        chat_responses.extend(chat_out)
-
-                    if len(X) > args.n_total:
-                        break
-
-        if args.use_tgi:
-            # process text examples with the TGI server
-            df = make_predictions(text_examples[:args.n_total], args, num_threads=args.max_batch_size)
-            # get the scores in batches
-            for batch_idx, batch in enumerate(tqdm(dataloader, total=int(np.ceil(args.n_total/args.batch_size)))):
-                # get the generated text for this batch
-                chat_out = df["generated_text"].iloc[batch_idx*args.batch_size:(batch_idx+1)*args.batch_size].tolist()
-                if chat_out == []:
-                    # we've already processed all the text examples
-                    # TODO: determine if this causes issues for datasets/losses other than
-                    # red_team_chat + toxicity
-                    break
-                scores = get_scores(args, scorer, chat_out, batch)
-                X.extend(scores)
-
-                if args.with_text:
-                    query_texts.extend(text)
-                    chat_responses.extend(chat_out)
-
-                if len(X) > args.n_total:
-                    break
-
-        X = np.array(X)
-
-        print("X", X.shape)
-        print(X)
-        print()
-
-        r = [instruction, X]
-        if args.with_text:
-            r.extend([query_texts, chat_responses])
-            assert X.shape[0] == len(query_texts) and len(query_texts) == len(chat_responses)
-
-        res.append(r)
-
-        if args.save_results and len(res) > args.save_after:
-
-            print("saving intermediate result", len(res), "to", args.save_root)
-            with open(args.save_root, 'wb') as file:
-                pkl.dump(res, file)
-
-    return res
-
 
 def main(args):
+    # TODO: extract this into a generate_outputs function that can be called from other scripts
     print(args, "\n")
     set_seeds(args.random_seed)
 
@@ -510,78 +322,9 @@ def main(args):
             stop_server(container)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Produce loss distribution")
-    parser.add_argument(
-        "--random_seed",
-        type=int,
-        default=42,
-        help="random seed"
-    )
-    parser.add_argument(
-        "--max_gen_len",
-        type=int,
-        default=50,
-        help="max length of LLM generations"
-    )
-    parser.add_argument(
-        "--n_total",
-        type=int,
-        default=None, # 2000 is a good number
-        help="number of evaluated datapoints",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=256,
-    )
-    parser.add_argument(
-        "--dataset",
-        default="xsum",
-        help="dataset for experiments"
-    )
-    parser.add_argument('--datasets', nargs='+', default=[], help='Datasets to evaluate on.')
-    parser.add_argument('--use_tgi', action='store_true', default=False, help='Use the text-generation-inference server to serve the model.')
-    parser.add_argument(
-        "--model_size",
-        default="base",
-        help="FLAN T5 model size"
-    )
-    parser.add_argument(
-        "--loss_fn",
-        default="bertscore",
-        type=str,
-        help="Outer loss function"
-    )
-    parser.add_argument(
-        "--num_hypotheses",
-        type=int,
-        default=50,
-        help="no. of hypotheses"
-    )
-    parser.add_argument(
-        "--save_after",
-        type=int,
-        default=0,
-        help="when to start saving intermediate results (will overwrite previous final results)"
-    )
-    parser.add_argument(
-        "--device",
-        default="cuda:0",
-        help="gpu device"
-    )
-    parser.add_argument(
-        "--with_text",
-        action="store_true"
-    )
-    parser.add_argument(
-        "--no_save",
-        action="store_true",
-    )
-    parser.add_argument('--output_dir', type=str, default='./output', help='Output directory')
-    parser.add_argument('--no_cache', action='store_true', default=False, help='Do not use cached results.')
     # merge the Docker/TGI args with the main args
-    args, unknown = parser.parse_known_args()
-    docker_args, remaining_unknown = parse_args(unknown, known_only=True)
+    args, unknown = scripts_parse_args(known_only=True)
+    docker_args, remaining_unknown = tgi_parse_args(unknown, known_only=True)
     # check if there are any remaining unknown args
     if remaining_unknown:
         raise argparse.ArgumentError(None, f'Unknown arguments: {remaining_unknown}')
