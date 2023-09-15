@@ -14,6 +14,17 @@ Examples:
         --print-container-logs \
         --n-total 2000 \
         --num-hypotheses 50
+    
+    $ python -m scripts.generate_outputs \
+        --datasets mbpp \
+        --use-tgi \
+        --model-name-or-path google/flan-t5-xxl \
+        --num-gpus 4 \
+        --server-port 8081 \
+        --dtype float16 \
+        --print-container-logs \
+        --n-total 2000 \
+        --num-hypotheses 50
 """
 import argparse
 from argparse import Namespace
@@ -45,6 +56,26 @@ from tgi.docker_utils import server_live, set_hf_token, start_server, stop_serve
 from tgi.args import parse_args as tgi_parse_args
 from scripts.args import parse_args as scripts_parse_args
 
+def mbpp_select_examples(k=3, n=50):
+    """Selects between 1 and k examples without replacement from Task IDs 1-10
+    per the Github repo instructions. Returns n examples total. Note that we check
+    that all examples are unique.
+    """
+    # NB: ensure random seeds are set before calling this function
+    assert k >= 1 and k <= 10, "k must be between 1 and 10"
+    chosen_idxs = set()
+    for i in range(n):
+        # ensure every example is unique
+        while True:
+            num_shots = random.randint(1, k)
+            idxs = random.sample(range(1, 11), k=num_shots)
+            idxs = tuple(idxs) # tuples are hashable
+            if idxs not in chosen_idxs:
+                chosen_idxs.add(idxs)
+                break
+    chosen_idxs = sorted([list(x) for x in chosen_idxs])
+    return chosen_idxs
+
 
 def get_instructions(args, instruction_sets):
     if args.dataset in ["xsum", "sumedh/MeQSum"]:
@@ -55,7 +86,19 @@ def get_instructions(args, instruction_sets):
         return instruction_sets["pubmed"]
     elif args.dataset in ["healthcare"]:
         return instruction_sets["healthcare"]
-
+    elif args.dataset in ["mbpp", "human_eval"]:
+        # TODO: return a list of dicts containing prompts and chosen k-shot examples
+        # will need to load mbpp dataset by this point
+        if args.dataset == "mbpp":
+            # select the k-shot examples
+            variants_needed = max(0, args.num_hypotheses - len(instruction_sets["code"]))
+            k_shot_idxs = mbpp_select_examples(k=args.k_shots, n=variants_needed)
+            instructions = [{'instruction': x} for x in instruction_sets["code"]]
+            # pad out the instructions with the k-shot examples, cycling through the list of prompts
+            for i in range(variants_needed):
+                instruction_idx = i % len(instruction_sets["code"])
+                instructions.append({'instruction': instruction_sets["code"][instruction_idx], 'k_shot_idxs': k_shot_idxs[i]})
+            return instructions
 
 def set_seeds(random_seed):
     random.seed(random_seed)
@@ -95,6 +138,9 @@ def get_instruction_root(args, instruction):
         ins_root = instruction + "\nHere is a human input: "
     elif args.dataset in ["pubmed_qa", "healthcare"]:
         ins_root = "You are a helpful medical chatbot. " + instruction + "\n\nHere is a medical query: "
+    elif args.dataset in ["mbpp", "human_eval"]:
+        # simply return the instruction because prompt preparation is handled elsewhere
+        ins_root = instruction
     else:
         raise ValueError
     return ins_root
@@ -164,6 +210,20 @@ def get_data(args, ins_root):
                 for b in batch["input"]
             ]
             data["output"] = batch["output"]
+            return data
+        dataset = dataset.map(prepend, batched=True)
+        dataset = dataset.with_format("torch")["text"]
+
+    elif args.dataset == "mbpp":
+        # TODO: take instruction and potential k-shots and format them into a prompt
+        dataset = load_dataset("mbpp")["test"]
+        def prepend(batch):
+            data = dict()
+            data["text"] = [
+                (ins_root + b + "\nProvide a detailed response in one paragraph: ")
+                for b in batch["code"]
+            ]
+            data["output"] = batch["code"]
             return data
         dataset = dataset.map(prepend, batched=True)
         dataset = dataset.with_format("torch")["text"]

@@ -52,6 +52,7 @@ def parse_args(passed_args=None, known_only=False):
         default=50,
         help="no. of hypotheses"
     )
+    parser.add_argument('--k-shots', type=int, default=3, help='Maximum number of shots to use for few-shot learning. Can use between 1 and --k-shots.')
     parser.add_argument(
         "--save-after",
         type=int,

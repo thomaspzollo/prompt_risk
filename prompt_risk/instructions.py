@@ -322,5 +322,20 @@ instruction_sets["healthcare"] = instructions = [
 ]
 
 
+instruction_sets["code"] = [
+    "Your goal is to write code that performs the specified task.",
+    "You are tasked with writing code that performs the specified task.",
+    "You are required to write code that generates the specified output.",
+    "You follow instructions to generate Python code.",
+    "You think step by step to produce high quality code.",
+    "You break coding problems down into smaller steps to produce the specified output.",
+    "You write code that can pass unit tests.",
+    "You are a software engineer who writes code.",
+    "You are a programmer who writes code to solve problems.",
+    "You write code that can be executed to produce the specified output.",
+    "You write correct code that can be executed to produce the specified output.",
+    "You are an expert Python programmer who writes code to solve problems.",
+]
+
 for k, v in instruction_sets.items():
     print(k, len(v))

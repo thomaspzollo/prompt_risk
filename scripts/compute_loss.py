@@ -5,7 +5,7 @@ Examples:
         --output-dir output \
         --datasets red_team_chat full_chat \
         --loss-fn weqweasdas/hh_rlhf_rm_open_llama_3b \
-        --batch-size 65 \
+        --batch-size 30 \
         --eval-models google/flan-t5-xxl
 """
 import argparse
@@ -33,6 +33,7 @@ def get_scorer(args):
     elif args.loss_fn == "accuracy":
         scorer = None
     elif args.loss_fn == "weqweasdas/hh_rlhf_rm_open_llama_3b":
+        # TODO: determine if this can be run on multiple GPUs, this can take about 15 minutes for 100,000 examples
         rm_tokenizer = AutoTokenizer.from_pretrained("weqweasdas/hh_rlhf_rm_open_llama_3b")
         scorer = pipeline(
             "sentiment-analysis",
@@ -136,6 +137,7 @@ def compute_chat_loss(df, reward_model_pipeline, args):
     tokenizer_kwargs={'truncation': True}
     pipe_kwargs.update(tokenizer_kwargs)
     start = time.perf_counter()
+    # TODO: identify rows that have already been computed and only compute loss for the remaining rows
     pipe_outputs = reward_model_pipeline(df['weqweasdas/hh_rlhf_rm_open_llama_3b_eval_text'].tolist(), **pipe_kwargs)
     end = time.perf_counter()
     print(f"Time to compute loss for {len(df):,} rows: {end-start:.2f} seconds. Average time per example: {(end-start)/len(df):.2f} seconds.")
