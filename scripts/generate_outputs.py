@@ -24,8 +24,8 @@ Examples:
         --server-port 8081 \
         --dtype float16 \
         --print-container-logs \
-        --n-total 100 \
-        --num-hypotheses 20 \
+        --n-total 103 \
+        --num-hypotheses 2 \
         --num-return-sequences 10 \
         --seed 42 \
         --do-sample
@@ -363,6 +363,9 @@ def tgi_prediction_pipeline(dataset, cache_df, args):
     col_order = ['id', 'text', 'generated_text']
     col_order.extend([col for col in df.columns if col not in col_order])
     cache_df = pd.concat([cache_df, df], ignore_index=True)
+    # retain any columns that were already in the cache
+    cache_cols = cache_df.columns
+    col_order = col_order + [col for col in cache_cols if col not in col_order]
     cache_df = cache_df[col_order]
     return cache_df
 

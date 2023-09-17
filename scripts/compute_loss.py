@@ -250,6 +250,8 @@ def main(args):
                 df = dfs[model_id]
                 hypothesis_dfs = list(df.groupby(['hypothesis']))
                 for h, sample_df in hypothesis_dfs:
+                    if sample_df['passed'].isna().any():
+                        continue
                     print(f'Hypothesis: {h}')
                     pass_at_k = calculate_pass_at_k(sample_df.to_dict(orient="records"), k=[1, 10])
                     print(pass_at_k)
