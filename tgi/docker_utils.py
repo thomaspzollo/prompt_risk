@@ -66,6 +66,10 @@ def start_server(args):
         command.extend(["--max-batch-total-tokens", str(args.max_batch_total_tokens)])
     if 'max_concurrent_requests' in args:
         command.extend(["--max-concurrent-requests", str(args.max_concurrent_requests)])
+    if 'rope_scaling' in args:
+        command.extend(["--rope-scaling", str(args.rope_scaling)])
+    if 'rope_factor' in args:
+        command.extend(["--rope-factor", str(args.rope_factor)])
     model_id_clean = model_id.replace("/", "-")
     container_name = f"text-generation-inference-{model_id_clean}-{num_shard}"
     if args.container_quantize:

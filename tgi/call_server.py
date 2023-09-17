@@ -78,36 +78,69 @@ def call_server(prompt,
         return text, response_dict
     return text
 
-def call_server_thread(queue, output_queue, generate_args, args):
+def call_server_thread(queue, output_queue, args):
     while True:
         example = queue.get()
         if example is None:
             break
-        text = example['text']
+        text = example.pop('text')
+        id = example.pop('id')
+        # remaining keys are generation arguments
+        generate_args = example
         url = f'http://{args.host}:{args.server_port}'
-        text, response_dict = call_server(text, url, return_response_dict=True, generate_args=generate_args)
-        # TODO: if we get an error, we should add a little sleep and retry
-
-        response = {'id': example['id'], 'text': example['text'],}
-        response.update(response_dict)
+        gen_text, response_dict = call_server(text, url, return_response_dict=True, generate_args=generate_args)
+        response = {'id': id, 'text': text, }
+        response.update(generate_args)
         # pop the response_object because we can't serialize it
         response_object = response_dict.pop('response_object')
+        response.update(response_dict)
         # retrieve the finish reason
         finish_reason = response_object.details.finish_reason
         response['finish_reason'] = finish_reason
+        response['generated_tokens'] = response_object.details.generated_tokens
         output_queue.put(response)
         queue.task_done()
         
         # report on progress every 100 examples
-        if example['id'] % 100 == 0:
-            print(f"Index: {example['id']}\nGenerated: {response['generated_text']}")
+        if id % 100 == 0:
+            print(f"Index: {response['id']}, Seed: {response['seed']}\nGenerated: {response['generated_text']}")
+
 
 def make_predictions(text_examples, args, num_threads=2):
     """Make predictions with the model in TGI server and save predictions to disk."""
-    # TODO: consider adding support to format text examples for llama chat models
+    # prepare generation arguments
+    max_new_tokens = args.max_new_tokens
+    if args.max_new_tokens is None:
+        max_new_tokens = args.max_total_tokens - args.max_input_length
+    generate_args = {'max_new_tokens': max_new_tokens,
+                     'do_sample': args.do_sample}
+    if 'top_k' in args and args.top_k is not None:
+        generate_args['top_k'] = args.top_k
+    # stop generating if you encounter a stop token
+    if 'stop' in args:
+        generate_args['stop_sequences'] = args.stop
+    if 'temperature' in args:
+        generate_args['temperature'] = args.temperature
+    if 'top_p' in args:
+        generate_args['top_p'] = args.top_p
+
     # give examples an ID to track their order
-    text_examples = [{'id': i, 'text': x} for i, x in enumerate(text_examples)]
-    
+    final_text_examples = []
+    for idx, x in enumerate(text_examples):
+        if isinstance(x, str):
+            example_dict = {'id': idx, 'text': x, 'seed': args.seed}
+        elif isinstance(x, dict):
+            example_dict = {'text': x['text'], 'seed': args.seed}
+            # retain any existing values
+            if 'id' in x:
+                example_dict['id'] = x['id']
+            if 'seed' in x:
+                example_dict['seed'] = x['seed']
+        # add in other generation arguments
+        example_dict.update(generate_args)
+        final_text_examples.append(example_dict)
+    text_examples = final_text_examples
+
     # parallelize API calls
     # TODO: switch over to asyncio and add error handling
     # create work queue
@@ -122,26 +155,18 @@ def make_predictions(text_examples, args, num_threads=2):
     sentinel_count = 1 if num_threads == 0 else num_threads 
     for _ in range(sentinel_count):
         queue.put(None)
-    
-    max_new_tokens = args.max_new_tokens
-    if args.max_new_tokens is None:
-        max_new_tokens = args.max_total_tokens - args.max_input_length
-    generate_args = {'max_new_tokens': max_new_tokens,
-                     'top_k': args.top_k,
-                     'seed': args.seed,
-                     'do_sample': not args.dont_sample}
 
     start = time.time()
     # useful to be able to call the server in the main thread for debugging
     if num_threads == 0:
         # run in the main thread
-        call_server_thread(queue, output_queue, generate_args, args)
+        call_server_thread(queue, output_queue, args)
     else:
         threads = []
         for _ in range(num_threads):
             # call_server_thread(queue, output_queue, args)
             t = threading.Thread(target=call_server_thread,
-                                args=(queue, output_queue, generate_args, args))
+                                args=(queue, output_queue, args))
             t.start()
             threads.append(t)
 

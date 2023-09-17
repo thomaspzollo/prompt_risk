@@ -7,19 +7,29 @@ Examples:
         --loss-fn weqweasdas/hh_rlhf_rm_open_llama_3b \
         --batch-size 30 \
         --eval-models google/flan-t5-xxl
+    
+    $ python -m scripts.compute_loss \
+        --output-dir output \
+        --datasets mbpp \
+        --loss-fn pass@k
 """
 import argparse
 import math
 import os
 import time
-import pandas as pd
+import multiprocessing as mp
 
+import numpy as np
+import pandas as pd
+from datasets import load_dataset, concatenate_datasets
 import evaluate
 from transformers import AutoTokenizer, pipeline
 import torch
 from detoxify import Detoxify
 
+from scripts.generate_outputs import prepare_test_code
 from scripts.args import parse_args
+from .code_eval.evaluation import evaluate_functional_correctness, calculate_pass_at_k
 
 def get_scorer(args):
     if args.loss_fn == "bleu":
@@ -42,6 +52,8 @@ def get_scorer(args):
             tokenizer=rm_tokenizer,
             model_kwargs={"torch_dtype": torch.bfloat16},
         )
+    elif args.loss_fn == "pass@k":
+        scorer = None
     else:
         raise ValueError
     return scorer
@@ -150,6 +162,52 @@ def compute_chat_loss(df, reward_model_pipeline, args):
     df[final_loss_col] = 1 / (1 + df['weqweasdas/hh_rlhf_rm_open_llama_3b_eval_reward'].apply(lambda x: math.exp(-1*(x-median))))
     return df, reward_model_pipeline
 
+
+def score_mbpp_predictions(df):
+    # TODO: create unified interface for loading data the same way in compute_loss.py and generate_outputs.py
+    dataset = load_dataset("mbpp")
+    # concat train, validation, and test portions
+    dataset = concatenate_datasets([dataset["train"], dataset["validation"], dataset["test"]])
+    label_df = dataset.to_pandas()
+    # drop the text column because it will conflict df's text column
+    label_df = label_df.drop(columns=["text"])
+    # merge with predictions on task_id
+    df = df.merge(label_df, on="task_id")
+    # extract python code from 'generated_text' column
+    df['generated_code'] = df['generated_text'].apply(lambda x: x.split('[PYTHON]')[1].strip().split('[/PYTHON]')[0].strip())
+    df['test_code'] = df.apply(lambda x: prepare_test_code(x), axis=1)
+    
+    # need to add a completion_id column to df for a unique identifier while we're in this function
+    df['completion_id'] = range(len(df))
+    # identify which rows have already been scored for functional correctness and only score the remaining rows
+    if 'passed' not in df.columns:
+        # all rows have not been scored for functional correctness
+        score_df = df[['completion_id', 'generated_code', 'test_code']]
+    else:
+        # some rows have already been scored for functional correctness
+        score_df = df[df['passed'].isna()][['completion_id', 'generated_code', 'test_code']]
+    # convert to a list of dictionaries
+    scores_needed = score_df.to_dict(orient="records")
+    print(f"Calculating functional correctness for {len(scores_needed):,}/{len(df):,} rows. {len(df)-len(scores_needed):,} rows already scored.")
+    if len(scores_needed) > 0:
+        workers = mp.cpu_count()
+        start = time.perf_counter()
+        results = evaluate_functional_correctness(scores_needed, n_workers=workers, timeout=3.0)
+        end = time.perf_counter()
+        print(f"Time to compute functional correctness for {len(scores_needed):,} rows: {end-start:.2f} seconds. Average time per example: {(end-start)/len(scores_needed):.2f} seconds.")
+        # convert results to a dataframe
+        results_df = pd.DataFrame(results)
+        # identify rows in df that were affected by the functional correctness check
+        # so that we can merge the results back into this particular portion of the df
+        results_df.set_index('completion_id', inplace=True)
+        df = df.set_index('completion_id')
+        df.loc[results_df.index, ['passed', 'result']] = results_df[['passed', 'result']]
+        # reset index and drop
+        df = df.reset_index(drop=True)
+    # drop unnecessary columns from mbpp 'code', 'test_list', 'test_setup_code', 'challenge_test_list'
+    df = df.drop(columns=['code', 'test_list', 'test_setup_code', 'challenge_test_list', 'completion_id'], errors='ignore')
+    return df
+
 def main(args):
     # TODO: extract this into a function that can be called from other scripts
 
@@ -185,6 +243,18 @@ def main(args):
             print(f"Computing loss for {model_id}")
             if 'chat' in args.dataset:
                 dfs[model_id], scorer = compute_chat_loss(df, scorer, args)
+            if args.dataset == 'mbpp':
+                # score mbpp predictions
+                dfs[model_id] = score_mbpp_predictions(dfs[model_id])
+                # calculate pass@k for each hypothesis
+                df = dfs[model_id]
+                hypothesis_dfs = list(df.groupby(['hypothesis']))
+                for h, sample_df in hypothesis_dfs:
+                    print(f'Hypothesis: {h}')
+                    pass_at_k = calculate_pass_at_k(sample_df.to_dict(orient="records"), k=[1, 10])
+                    print(pass_at_k)
+
+
             # save back to the same file
             dfs[model_id].to_csv(os.path.join(args.output_dir, args.dataset, f"{model_id}_predictions.csv"), index=False)
 

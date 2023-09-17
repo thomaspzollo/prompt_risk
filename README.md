@@ -73,3 +73,21 @@ nohup python -u -m scripts.generate_outputs \
     --num_hypotheses 50 \
 > generate_outputs.log 2>&1 &
 ```
+
+Run Code Llama on MBPP:
+```bash
+nohup python -u -m scripts.generate_outputs \
+    --datasets mbpp \
+    --use-tgi \
+    --model-name-or-path codellama/CodeLlama-7b-Instruct-hf \
+    --num-gpus 1 \
+    --server-port 8081 \
+    --dtype float16 \
+    --print-container-logs \
+    --n-total 100 \
+    --num-hypotheses 20 \
+    --num-return-sequences 10 \
+    --seed 42 \
+    --do-sample \
+> generate_outputs.log 2>&1 &
+```

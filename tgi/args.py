@@ -25,8 +25,8 @@ def parse_args(passed_args=None, known_only=False):
     parser.add_argument('--max-total-tokens', type=int, default=4096)
     parser.add_argument('--max-new-tokens', type=int, default=2048)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--top-k', type=int, default=50)
-    parser.add_argument('--dont-sample', action='store_true', default=False)
+    parser.add_argument('--top-k', type=int, default=None)
+    parser.add_argument('--do-sample', action='store_true', default=False)
     parser.add_argument('--print-container-logs',
                         action='store_true',
                         default=False)
