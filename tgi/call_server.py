@@ -204,7 +204,7 @@ def get_batch_size(container, max_total_tokens, max_concurrent_requests=128):
         print(f"Warning: max batch size of {max_batch_size:,} is too large. Setting to {max_concurrent_requests}.")
         print(f"Consider increasing the maximum number of concurrent requests in the TGI server.")
         max_batch_size = max_concurrent_requests
-    print(f"Setting max batch size to {max_batch_size:,} based on max batch total tokens of {max_batch_total_tokens:,} and input length of {max_total_tokens:,}.")
+    print(f"Setting max batch size to {max_batch_size:,} based on max batch total tokens of {max_batch_total_tokens:,} and max sequence total of {max_total_tokens:,}.")
     return max_batch_size
 
 def main(args):

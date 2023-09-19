@@ -29,6 +29,18 @@ Examples:
         --num-return-sequences 10 \
         --seed 42 \
         --do-sample
+    
+    $ python -m scripts.generate_outputs \
+        --datasets bigbio/meqsum \
+        --use-tgi \
+        --model-name-or-path tiiuae/falcon-7b-instruct \
+        --num-gpus 1 \
+        --server-port 8081 \
+        --dtype float16 \
+        --print-container-logs \
+        --n-total 100 \
+        --num-hypotheses 21 \
+        --seed 42
 """
 import argparse
 import os
@@ -44,7 +56,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForSeq2SeqLM,
                         AutoTokenizer)
 
-from prompt_risk.instructions import instruction_sets
+from prompt_risk.instructions import instruction_sets, MEQSUM_PROMPT_FILES
 from scripts.llama_utils import prepare_chats
 from scripts.args import parse_args as scripts_parse_args
 from tgi.args import parse_args as tgi_parse_args
@@ -53,30 +65,55 @@ from tgi.docker_utils import set_hf_token, start_server, stop_server
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-def mbpp_select_examples(k=3, n=50):
-    """Selects between 1 and k examples without replacement from Task IDs 1-10
-    per the Github repo instructions. Returns n examples total. Note that we check
-    that all examples are unique.
+
+def select_k_shot_examples(k=3, n=50, idx_start=1, idx_end=11):
+    """Selects between 1 and k examples without replacement from Task IDs [idx_start, idx_end).
+    Returns n examples total. Note that we check that all examples are unique.
     """
     # NB: ensure random seeds are set before calling this function
-    assert k >= 1 and k <= 10, "k must be between 1 and 10"
+    assert k >= 1 and k <= idx_end, f"k must be between 1 and {idx_end}"
     chosen_idxs = set()
+    # crucially we need to preserve the order of the idxs to be able to build incrementally
+    # i.e. num_hypotheses 2->20
+    ordered_chosen_idxs = []
     for i in range(n):
         # ensure every example is unique
         while True:
             num_shots = random.randint(1, k)
-            idxs = random.sample(range(1, 11), k=num_shots)
+            idxs = random.sample(range(idx_start, idx_end), k=num_shots)
+            # note that we're preserving the order of the idxs (i.e. 1, 2 != 2, 1)
             idxs = tuple(idxs) # tuples are hashable
             if idxs not in chosen_idxs:
                 chosen_idxs.add(idxs)
+                ordered_chosen_idxs.append(idxs)
                 break
-    chosen_idxs = sorted([list(x) for x in chosen_idxs])
+    chosen_idxs = [list(x) for x in ordered_chosen_idxs]
     return chosen_idxs
 
+def create_hypotheses(args, instruction_set, k_shot_idx_start=0, k_shot_idx_end=10):
+    """Creates hypotheses for the specified instruction set, including choosing k-shot examples."""
+    # select the k-shot examples
+    variants_needed = max(0, args.num_hypotheses - len(instruction_sets[instruction_set]))
+    k_shot_idxs = select_k_shot_examples(k=args.k_shots, n=variants_needed, idx_start=k_shot_idx_start, idx_end=k_shot_idx_end)
+    instructions = []
+    for i in range(args.num_hypotheses):
+        # first add the instructions without the k-shot examples
+        if i < len(instruction_sets[instruction_set]):
+            instructions.append({'instruction': instruction_sets[instruction_set][i]})
+        else:
+            # then start adding the k-shot examples, while cycling through the list of prompts
+            instruction_idx = i % len(instruction_sets[instruction_set])
+            idx_into_kshots = i - len(instruction_sets[instruction_set])
+            instructions.append({'instruction': instruction_sets[instruction_set][instruction_idx], 'k_shot_idxs': k_shot_idxs[idx_into_kshots]})
+    return instructions
 
 def get_instructions(args, instruction_sets):
-    if args.dataset in ["xsum", "sumedh/MeQSum"]:
+    if args.dataset in ["xsum"]:
         return instruction_sets["summarization"]
+    elif args.dataset in ['bigbio/meqsum']:
+        instruction_set = "healthcare_question_summarization"
+        instructions = create_hypotheses(args, instruction_set, k_shot_idx_start=0, k_shot_idx_end=len(MEQSUM_PROMPT_FILES))
+        return instructions
     elif args.dataset in ["red_team_chat", "full_chat"]:
         return instruction_sets["chat"]
     elif args.dataset in ["pubmed_qa"]:
@@ -87,14 +124,9 @@ def get_instructions(args, instruction_sets):
         # TODO: return a list of dicts containing prompts and chosen k-shot examples
         # will need to load mbpp dataset by this point
         if args.dataset == "mbpp":
-            # select the k-shot examples
-            variants_needed = max(0, args.num_hypotheses - len(instruction_sets["code"]))
-            k_shot_idxs = mbpp_select_examples(k=args.k_shots, n=variants_needed)
-            instructions = [{'instruction': x} for x in instruction_sets["code"]]
-            # pad out the instructions with the k-shot examples, cycling through the list of prompts
-            for i in range(variants_needed):
-                instruction_idx = i % len(instruction_sets["code"])
-                instructions.append({'instruction': instruction_sets["code"][instruction_idx], 'k_shot_idxs': k_shot_idxs[i]})
+            instruction_set = "code"
+            # task_IDs range from 1-10
+            instructions = create_hypotheses(args, instruction_set, k_shot_idx_start=1, k_shot_idx_end=11)
             return instructions
 
 def set_seeds(random_seed):
@@ -129,13 +161,13 @@ def get_chat_model(args):
 
 
 def get_instruction_root(args, instruction):
-    if args.dataset in ["xsum", "sumedh/MeQSum"]:
+    if args.dataset in ["xsum"]:
         ins_root = "Your goal is to summarize a document. " + instruction + " Summarize the following document: \nDocument: "
     elif args.dataset in ["red_team_chat", "full_chat"]:
         ins_root = instruction + "\nHere is a human input: "
     elif args.dataset in ["pubmed_qa", "healthcare"]:
         ins_root = "You are a helpful medical chatbot. " + instruction + "\n\nHere is a medical query: "
-    elif args.dataset in ["mbpp", "human_eval"]:
+    elif args.dataset in ["mbpp", "human_eval", "bigbio/meqsum"]:
         # simply return the instruction because prompt preparation is handled elsewhere
         ins_root = instruction
     else:
@@ -171,6 +203,27 @@ def prepare_mbpp_user_prompt(mbpp_example, prompt_dataset, k_shot_idxs):
     task = mbpp_example['text']
     test_text = prepare_test_code(mbpp_example)
     prompt.append(template.format(task, test_text))
+    prompt = '\n'.join(prompt)
+    return {'prompt': prompt}
+
+def prepare_meqsum_user_prompt(task_example, prompt_dataset, k_shot_idxs):
+    """Prepares user portion of the prompt, potentially including k-shot examples.
+    The system prompt will be prepended to the user prompt at a later stage.
+    """
+    template = 'Summarize the following user question:\n{}\n\nYour summary should start with a [SUMMARY] tag and end with a [/SUMMARY] tag.'
+    prompt = []
+    # add the k-shot examples
+    for idx in k_shot_idxs:
+        example = prompt_dataset[idx]
+        task = example['CHQ']
+        prompt.append(template.format(task))
+        # show correct answer for this example
+        correct_answer = f'[SUMMARY]\n{example["Summary"].strip()}\n[/SUMMARY]'
+        prompt.append(correct_answer)
+    
+    # add task to be completed
+    task = task_example['CHQ']
+    prompt.append(template.format(task))
     prompt = '\n'.join(prompt)
     return {'prompt': prompt}
 
@@ -228,19 +281,37 @@ def get_data(args, ins_root):
         dataset = dataset.map(prepend, batched=True)
         dataset = dataset.with_format("torch")["text"]
     
-    elif args.dataset == "sumedh/MeQSum":
-        # TODO: parse this with an excel parser
-        dataset = load_dataset("sumedh/MeQSum")["train"]
-        def prepend(batch):
-            data = dict()
-            data["text"] = [
-                (ins_root + b + "\nProvide a detailed response in one paragraph: ")
-                for b in batch["input"]
-            ]
-            data["output"] = batch["output"]
-            return data
-        dataset = dataset.map(prepend, batched=True)
-        dataset = dataset.with_format("torch")["text"]
+    elif args.dataset == "bigbio/meqsum":
+        dataset = load_dataset("bigbio/meqsum", "meqsum_source")['train']
+        prompt_dataset = dataset.filter(lambda x: x['File'] in MEQSUM_PROMPT_FILES)
+        dataset = dataset.filter(lambda x: x['File'] not in MEQSUM_PROMPT_FILES)
+        # take instruction and potential k-shots and format them into a formatted dialog
+        system_prompt = ins_root['instruction']
+        k_shot_idxs = ins_root['k_shot_idxs'] if 'k_shot_idxs' in ins_root else []
+        dataset = dataset.map(prepare_meqsum_user_prompt, batched=False, fn_kwargs={'prompt_dataset': prompt_dataset, 'k_shot_idxs': k_shot_idxs})
+        # if llama model, format accordingly
+        if 'llama' in args.model_name_or_path:
+            system_message = {'role': 'system', 'content': system_prompt}
+            # prepare the dialogs by combining the system prompt with the user prompt
+            dialogs = []
+            for example in dataset:
+                dialog = [system_message]
+                dialog.append({'role': 'user', 'content': example['prompt']})
+                dialogs.append(dialog)
+            
+            dialogs = prepare_chats(dialogs)
+        else: # e.g. Falcon model
+            dialogs = []
+            for example in dataset:
+                dialog = system_prompt.strip() + '\n\n' + example['prompt']
+                dialogs.append(dialog)
+
+        # retain the task_id (i.e. the File) for each example
+        final_dataset = []
+        for i, dialog in enumerate(dialogs):
+            example = {'text': dialog, 'task_id': dataset[i]['File']}
+            final_dataset.append(example)
+        dataset = final_dataset
 
     elif args.dataset == "mbpp":
         dataset = load_dataset("mbpp")
@@ -251,7 +322,7 @@ def get_data(args, ins_root):
         if 'codellama' not in args.model_name_or_path:
             raise ValueError("mbpp dataset is only supported for codellama models. If other models are needed, format the prompts accordingly.")
         
-        # TODO: take instruction and potential k-shots and format them into a formatted dialog for code llama
+        # take instruction and potential k-shots and format them into a formatted dialog for code llama
         system_prompt = ins_root['instruction']
         system_message = {'role': 'system', 'content': system_prompt}
         k_shot_idxs = ins_root['k_shot_idxs'] if 'k_shot_idxs' in ins_root else []
@@ -387,7 +458,8 @@ def main(args):
     for dataset_ in args.datasets:
         args.dataset = dataset_
         # define output folder and cache csv path
-        save_folder = os.path.join(args.output_dir, args.dataset)
+        dataset_dir = args.dataset.replace("/", "_")
+        save_folder = os.path.join(args.output_dir, dataset_dir)
         os.makedirs(save_folder, exist_ok=True)
         model_name = args.model_name_or_path.replace("/", "-")
         csv_path = os.path.join(save_folder, f'{model_name}_predictions.csv')
@@ -445,7 +517,7 @@ def main(args):
         args.max_new_tokens = args.max_total_tokens - args.max_input_length
         print(f"Max input length: {args.max_input_length:,}")
         print(f"Max total tokens: {args.max_total_tokens:,}")
-
+        
         if args.use_tgi:
             args.max_concurrent_requests = 128 # default
             if 'flan-t5' in args.model_name_or_path:
@@ -475,6 +547,9 @@ def main(args):
                 # following the codellama paper: https://arxiv.org/pdf/2308.12950.pdf
                 args.top_p = 0.95
                 args.temperature = 0.8
+            if args.dataset == 'bigbio/meqsum':
+                # include [/SUMMARY] and </s> in the stop tokens
+                args.stop = ['[/SUMMARY]', tokenizer.eos_token]
             cache_df = tgi_prediction_pipeline(dataset, cache_df, args)
             # save csv the predictions
             cache_df.to_csv(csv_path, index=False)

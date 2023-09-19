@@ -1,0 +1,44 @@
+version: "3.4"
+
+services:
+  tgi:
+    build:
+      context: .
+      dockerfile: Dockerfile-tgi
+    ports:
+      - 8081:80
+    volumes: 
+      - $PWD/data:/data
+      - /tmp:/tmp
+    environment:
+      - MODEL_ID=meta-llama/Llama-2-7b-hf
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - NUM_SHARD=1
+      - MAX_INPUT_LENGTH=512
+      - MAX_TOTAL_TOKENS=1024
+      - DTYPE=float16
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 100
+  benchmark:
+    image: ghcr.io/huggingface/text-generation-inference:latest
+    entrypoint: text-generation-benchmark
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - TOKENIZER_NAME=meta-llama/Llama-2-7b-hf
+    volumes:
+      - /tmp:/tmp
+    depends_on:
+      tgi:
+        condition: service_healthy
+    stdin_open: true
+    tty: true

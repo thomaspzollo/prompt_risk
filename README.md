@@ -59,7 +59,15 @@ docker run \
         --dtype float16
 ```
 
+Benchmark and tune TGI to maximize throughput (optional):
+```bash
+docker-compose up -d
+docker-compose exec benchmark /bin/bash
+text-generation-benchmark --sequence-length 2048 --decode-length 200 --runs 5 --batch-size 4
+```
+
 ## Make predictions
+Run Red Team Chat on Flan-T5:
 ```bash
 nohup python -u -m scripts.generate_outputs \
     --datasets red_team_chat full_chat \
@@ -84,10 +92,28 @@ nohup python -u -m scripts.generate_outputs \
     --server-port 8081 \
     --dtype float16 \
     --print-container-logs \
-    --n-total 100 \
+    --n-total 300 \
     --num-hypotheses 20 \
     --num-return-sequences 10 \
     --seed 42 \
     --do-sample \
+> generate_outputs.log 2>&1 &
+```
+
+Run MeQSum on Falcon 7b:
+```bash
+nohup python -u -m scripts.generate_outputs \
+    --datasets meqsum \
+    --use-tgi \
+    --model-name-or-path meta-llama/Llama-2-7b-hf \
+    --num-gpus 1 \
+    --server-port 8081 \
+    --dtype float16 \
+    --print-container-logs \
+    --n-total 300 \
+    --num-hypotheses 20 \
+    --num-return-sequences 10 \
+    --seed 42 \
+    --do-sample
 > generate_outputs.log 2>&1 &
 ```

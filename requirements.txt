@@ -12,3 +12,5 @@ evaluate
 datasets
 detoxify
 bert_score
+openpyxl
+rouge_score

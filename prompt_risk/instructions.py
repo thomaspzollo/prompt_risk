@@ -337,5 +337,21 @@ instruction_sets["code"] = [
     "You are an expert Python programmer who writes code to solve problems.",
 ]
 
-for k, v in instruction_sets.items():
-    print(k, len(v))
+instruction_sets["healthcare_question_summarization"] = [
+    "Your goal is to generate a succinct version of the user's question that captures the main points.",
+    "You are tasked with creating a shortened version of the user's question that retains the main ideas.",
+    "You are required to produce a concise version of the user's question that preserves the key information.",
+    "You follow instructions to generate a brief version of the user's question that captures the main points.",
+    "You generate a brief version of the user's question that's safe and high fidelity.",
+    "You are a medical expert who generates a brief version of the user's question that captures the main points.",
+    "You summarize user queries without missing any important details.",
+    "You provide short summaries of user queries while acknowledging that medical questions are complex and must be treated with care.",
+    "You don't miss crucial details when summarizing user queries.",
+]
+
+# files to consider for few-shot learning: who, what, where, when, why, is, should, how, can, etc.
+MEQSUM_PROMPT_FILES = ["1-131188152.xml.txt", "15410.txt", "1-132811409.xml.txt", "12224.txt",
+        "17078.txt", "1-133026225.xml.txt", "1-132720725.xml.txt", "17136.txt",
+        "1-123056965.xml.txt", "1-132122825.xml.txt"]
+# for k, v in instruction_sets.items():
+#     print(k, len(v))

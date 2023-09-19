@@ -1,3 +1,8 @@
+"""This module provides a sandboxed environment for executing generated code.
+
+This code is largely borrowed from the HumanEval github repo:
+https://github.com/openai/human-eval/tree/master
+"""
 from typing import Optional, Callable, Dict
 import ast
 import contextlib

@@ -12,6 +12,11 @@ Examples:
         --output-dir output \
         --datasets mbpp \
         --loss-fn pass@k
+    
+    $ python -m scripts.compute_loss \
+        --output-dir output \
+        --datasets bigbio/meqsum \
+        --loss-fn rouge
 """
 import argparse
 import math
@@ -26,6 +31,7 @@ import evaluate
 from transformers import AutoTokenizer, pipeline
 import torch
 from detoxify import Detoxify
+from prompt_risk.instructions import MEQSUM_PROMPT_FILES
 
 from scripts.generate_outputs import prepare_test_code
 from scripts.args import parse_args
@@ -208,6 +214,36 @@ def score_mbpp_predictions(df):
     df = df.drop(columns=['code', 'test_list', 'test_setup_code', 'challenge_test_list', 'completion_id'], errors='ignore')
     return df
 
+def extract_summary(text):
+    parts = text.split('[SUMMARY]')
+    if len(parts) == 1:
+        return parts[0]
+    parts = parts[1].split('[/SUMMARY]')
+    if len(parts) == 1:
+        return parts[0]
+    return parts[0].strip()
+
+def score_meqsum_predictions(df, scorer):
+    # load reference summaries
+    dataset = load_dataset("bigbio/meqsum", "meqsum_source")['train']
+    dataset = dataset.filter(lambda x: x['File'] not in MEQSUM_PROMPT_FILES)
+    # rename 'File' column to 'task_id' to match df
+    label_df = dataset.to_pandas().rename(columns={'File': 'task_id'})
+    # merge with predictions on task_id
+    df = df.merge(label_df, on="task_id", how="left")
+    # extract prediction from 'generated_text' column
+    df['generated_summary'] = df['generated_text'].apply(lambda x: extract_summary(x))
+    # compute rouge scores
+    rouge_scores = scorer.compute(predictions=df['generated_summary'].tolist(), references=df['Summary'].tolist(), use_aggregator=False)
+    # extract rougeL scores
+    rougeL_scores = rouge_scores['rougeL']
+    # add rougeL scores to df
+    df['rougeL'] = rougeL_scores
+    # drop unnecessary columns from meqsum 'CHQ', 'Summary'
+    df = df.drop(columns=['CHQ', 'Summary'], errors='ignore')
+    return df
+
+
 def main(args):
     # TODO: extract this into a function that can be called from other scripts
 
@@ -219,23 +255,27 @@ def main(args):
         # lazily load the reward model pipeline (we might have already computed loss scores, in which case, save time on the load time)
         scorer = None
         args.dataset = dataset
+        dataset_dir = args.dataset.replace("/","_") # handle datasets like bigbio/meqsum
         # load generated outputs for specified models
         models = [x.replace("/","-") for x in args.eval_models]
         # if no models specified, load all models
         if not models:
-            files = os.listdir(os.path.join(args.output_dir, args.dataset))
+            files = os.listdir(os.path.join(args.output_dir, dataset_dir))
             files = [f for f in files if f.endswith(".csv")]
         else:
             files = [f"{m}_predictions.csv" for m in models]
         dfs = {}
         for f in files:
             model_id = f.split("_predictions.csv")[0]
-            df = pd.read_csv(os.path.join(args.output_dir, args.dataset, f))
+            df = pd.read_csv(os.path.join(args.output_dir, dataset_dir, f))
             dfs[model_id] = df
 
             # check if all models have the expected number of rows populated with text
             if dfs[model_id].shape[0] != 50*2000:
                 print(f"Warning: {model_id} has {dfs[model_id].shape[0]} rows, expected 50*2000=100,000")
+            # it's possible that the model simply predicts EOS, which means generated text will be nan
+            valid_empty_rows = (dfs[model_id]['finish_reason'] == 'eos_token') & dfs[model_id]['generated_text'].isna()
+            dfs[model_id].loc[valid_empty_rows, 'generated_text'] = ''
             # check for any nans in generated_text
             assert dfs[model_id].generated_text.isna().sum() == 0
 
@@ -243,7 +283,7 @@ def main(args):
             print(f"Computing loss for {model_id}")
             if 'chat' in args.dataset:
                 dfs[model_id], scorer = compute_chat_loss(df, scorer, args)
-            if args.dataset == 'mbpp':
+            elif args.dataset == 'mbpp':
                 # score mbpp predictions
                 dfs[model_id] = score_mbpp_predictions(dfs[model_id])
                 # calculate pass@k for each hypothesis
@@ -255,10 +295,15 @@ def main(args):
                     print(f'Hypothesis: {h}')
                     pass_at_k = calculate_pass_at_k(sample_df.to_dict(orient="records"), k=[1, 10])
                     print(pass_at_k)
-
+            elif args.dataset == 'bigbio/meqsum':
+                # score meqsum predictions
+                scorer = get_scorer(args)
+                dfs[model_id] = score_meqsum_predictions(dfs[model_id], scorer)
+                scorer = None # in case we need to load a different scorer for the next dataset
+                print(f'Average rougeL score on {args.dataset} - {model_id}: {dfs[model_id]["rougeL"].mean():.4f}')
 
             # save back to the same file
-            dfs[model_id].to_csv(os.path.join(args.output_dir, args.dataset, f"{model_id}_predictions.csv"), index=False)
+            dfs[model_id].to_csv(os.path.join(args.output_dir, dataset_dir, f"{model_id}_predictions.csv"), index=False)
 
 if __name__ == "__main__":
     args = parse_args()
