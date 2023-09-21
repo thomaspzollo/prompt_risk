@@ -103,17 +103,60 @@ nohup python -u -m scripts.generate_outputs \
 Run MeQSum on Falcon 7b:
 ```bash
 nohup python -u -m scripts.generate_outputs \
-    --datasets meqsum \
+    --datasets bigbio/meqsum \
     --use-tgi \
-    --model-name-or-path meta-llama/Llama-2-7b-hf \
+    --model-name-or-path tiiuae/falcon-7b-instruct \
     --num-gpus 1 \
     --server-port 8081 \
     --dtype float16 \
     --print-container-logs \
-    --n-total 300 \
-    --num-hypotheses 20 \
-    --num-return-sequences 10 \
+    --n-total 1000 \
+    --num-hypotheses 50 \
     --seed 42 \
-    --do-sample
 > generate_outputs.log 2>&1 &
+```
+Generate embeddings for full_chat/red_team_chat:
+```bash
+# red_team_chat
+python -u -m scripts.generate_outputs \
+    --datasets full_chat \
+    --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
+    --num-gpus 2 \
+    --n-total 2000 \
+    --batch-size 1000 \
+    --seed 42 \
+    --embed
+```
+Generate embeddings for CNN Daily Mail corpus:
+```bash
+python -u -m scripts.generate_outputs \
+    --datasets cnn_dailymail \
+    --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
+    --num-gpus 2 \
+    --n-total 10000 \
+    --batch-size 1000 \
+    --seed 42 \
+    --embed
+```
+
+Generate embeddings for XSUM:
+```bash
+python -u -m scripts.generate_outputs \
+    --datasets xsum \
+    --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
+    --num-gpus 2 \
+    --n-total 10000 \
+    --batch-size 1000 \
+    --seed 42 \
+    --embed
+```
+
+## Upload outputs to S3
+First configure your AWS credentials with `aws configure`. Follow [these instructions](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html#cliv2-linux-install) if you need to install the aws CLI.
+
+Then run:
+```bash
+python -m scripts.upload_to_s3 \
+    --output-dir ./output \
+    --s3-bucket-name prompt-risk-control \
 ```

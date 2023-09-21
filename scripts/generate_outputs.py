@@ -6,7 +6,6 @@ a GPU for the evaluation models (e.g. BERTScore, Detoxify, etc.) to avoid memory
 Examples:
     $ python -m scripts.generate_outputs \
         --datasets red_team_chat full_chat \
-        --use-tgi \
         --model-name-or-path google/flan-t5-xxl \
         --num-gpus 4 \
         --server-port 8081 \
@@ -18,7 +17,6 @@ Examples:
     
     $ python -m scripts.generate_outputs \
         --datasets mbpp \
-        --use-tgi \
         --model-name-or-path codellama/CodeLlama-7b-Instruct-hf \
         --num-gpus 1 \
         --server-port 8081 \
@@ -32,7 +30,6 @@ Examples:
     
     $ python -m scripts.generate_outputs \
         --datasets bigbio/meqsum \
-        --use-tgi \
         --model-name-or-path tiiuae/falcon-7b-instruct \
         --num-gpus 1 \
         --server-port 8081 \
@@ -41,24 +38,34 @@ Examples:
         --n-total 100 \
         --num-hypotheses 21 \
         --seed 42
+    
+    $ python -u -m scripts.generate_outputs \
+        --datasets cnn_dailymail \
+        --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
+        --num-gpus 2 \
+        --n-total 10000 \
+        --batch-size 1000 \
+        --seed 42
 """
 import argparse
 import os
 import random
 from argparse import Namespace
+import time
 
 import numpy as np
 import pandas as pd
 import torch
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset, concatenate_datasets, Dataset
+from sentence_transformers import SentenceTransformer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (AutoModelForSeq2SeqLM,
                         AutoTokenizer)
 
 from prompt_risk.instructions import instruction_sets, MEQSUM_PROMPT_FILES
-from scripts.llama_utils import prepare_chats
-from scripts.args import parse_args as scripts_parse_args
+from .llama_utils import prepare_chats
+from .args import parse_args as scripts_parse_args
 from tgi.args import parse_args as tgi_parse_args
 from tgi.call_server import get_batch_size, make_predictions
 from tgi.docker_utils import set_hf_token, start_server, stop_server
@@ -108,24 +115,21 @@ def create_hypotheses(args, instruction_set, k_shot_idx_start=0, k_shot_idx_end=
     return instructions
 
 def get_instructions(args, instruction_sets):
-    if args.dataset in ["xsum"]:
-        return instruction_sets["summarization"]
+    if args.dataset in ["xsum", "cnn_dailymail"]:
+        # convert to dictionaries for consistency with other datasets
+        instructions = [{'instruction': ins} for ins in instruction_sets["summarization"]]
+        return instructions
     elif args.dataset in ['bigbio/meqsum']:
         instruction_set = "healthcare_question_summarization"
         instructions = create_hypotheses(args, instruction_set, k_shot_idx_start=0, k_shot_idx_end=len(MEQSUM_PROMPT_FILES))
         return instructions
     elif args.dataset in ["red_team_chat", "full_chat"]:
-        return instruction_sets["chat"]
-    elif args.dataset in ["pubmed_qa"]:
-        return instruction_sets["pubmed"]
-    elif args.dataset in ["healthcare"]:
-        return instruction_sets["healthcare"]
+        return [{'instruction': ins} for ins in instruction_sets["chat"]]
     elif args.dataset in ["mbpp", "human_eval"]:
-        # TODO: return a list of dicts containing prompts and chosen k-shot examples
-        # will need to load mbpp dataset by this point
+        # return a list of dicts containing prompts and chosen k-shot examples
         if args.dataset == "mbpp":
             instruction_set = "code"
-            # task_IDs range from 1-10
+            # task_IDs range from 1-10, per github --> [1, 11)
             instructions = create_hypotheses(args, instruction_set, k_shot_idx_start=1, k_shot_idx_end=11)
             return instructions
 
@@ -134,45 +138,79 @@ def set_seeds(random_seed):
     torch.manual_seed(random_seed)
     np.random.seed(random_seed)
 
+def subset_ensure_unique(dataset, n_total, text_col_name='text', shuffle=True):
+    """Subsets the dataset to n_total examples and ensures that all examples are
+    unique."""
+    # shuffle the dataset
+    if shuffle:
+        idxs = list(range(len(dataset)))
+        random.shuffle(idxs) # assuming seed has been set
+        dataset = dataset.select(idxs)
 
-def get_chat_model(args):
-    if args.dataset in ["med_sum", "chat_doctor_sum"]:
-        model_name = "GanjinZero/biobart-large"
-        # model_name = "microsoft/biogpt"
-        chat_model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_name,
-            # device_map="auto",
-            # torch_dtype=torch.float16
-        ).to(args.device)
-        chat_tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # chat_tokenizer.pad_token = chat_tokenizer.eos_token
-    else:
-        model_name = "google/flan-t5-{}".format(args.model_size)
-        chat_model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            # torch_dtype=torch.float16
-        ).to(args.device)
-        chat_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if n_total is None:
+        n_total = len(dataset)
+    
+    # clip to requested number of examples    
+    if len(dataset) < n_total:
+        print(f"Warning: {n_total:,} examples requested but only {len(dataset):,} examples available. Using {len(dataset):,} examples.")
+    dataset_slice = slice(0, n_total)
+    if isinstance(dataset, pd.DataFrame):
+        dataset = dataset.iloc[dataset_slice]
+    elif isinstance(dataset, list):
+        dataset = dataset[dataset_slice]
+    elif isinstance(dataset, Dataset):
+        # the behavior of slicing a Dataset is different than a list
+        # it returns a dictionary of columns mapped to lists as opposed to records format
+        dataset = dataset.select(range(n_total))
 
-    chat_model.eval()
-    print("chat model loaded")
-    return chat_model, chat_tokenizer
+    # check if any of the text examples are duplicated
+    # if so, warn user
+    unique = set(dataset[text_col_name])
+    n_unique = len(unique)
+    n_total = len(dataset)
+    if n_unique != n_total:
+        print(f"Warning: {n_total - n_unique}/{n_total} examples are duplicates.")
+    # TODO: consider removing duplicates and adding a while condition to pad the dataset with more unique examples
+    return dataset
+
+def extract_user_portion(convo_string):
+    return convo_string.split("Human: ")[1].split("\n")[0].strip()
+
+def prepare_chat_user_prompt(task_example, chat_col_name='rejected'):
+    """Format user portion of the chat. Include system prompt at a later stage."""
+    template = 'Your goal is to respond to the following human input:\nHuman: {}\nChatbot Response:'
+    conversation = task_example[chat_col_name]
+    human_input = extract_user_portion(conversation)
+    prompt = template.format(human_input)
+    return {'prompt': prompt}
 
 
-def get_instruction_root(args, instruction):
-    if args.dataset in ["xsum"]:
-        ins_root = "Your goal is to summarize a document. " + instruction + " Summarize the following document: \nDocument: "
-    elif args.dataset in ["red_team_chat", "full_chat"]:
-        ins_root = instruction + "\nHere is a human input: "
-    elif args.dataset in ["pubmed_qa", "healthcare"]:
-        ins_root = "You are a helpful medical chatbot. " + instruction + "\n\nHere is a medical query: "
-    elif args.dataset in ["mbpp", "human_eval", "bigbio/meqsum"]:
-        # simply return the instruction because prompt preparation is handled elsewhere
-        ins_root = instruction
-    else:
-        raise ValueError
-    return ins_root
+def prepare_complete_chat_input(args, dataset, instruction, id_col_name='task_id'):
+    """Prepares the complete chat input, including the system prompt and user prompt."""
+    system_prompt = instruction['instruction']
+    # if llama model, format accordingly
+    if 'llama' in args.model_name_or_path:
+        system_message = {'role': 'system', 'content': system_prompt}
+        # prepare the dialogs by combining the system prompt with the user prompt
+        dialogs = []
+        for example in dataset:
+            dialog = [system_message]
+            dialog.append({'role': 'user', 'content': example['prompt']})
+            dialogs.append(dialog)
+        dialogs = prepare_chats(dialogs)
+    else: # e.g. Falcon model
+        dialogs = []
+        for example in dataset:
+            dialog = system_prompt.strip() + '\n\n' + example['prompt']
+            dialogs.append(dialog)
+
+    # retain the task_id (e.g., id) for each example
+    final_dataset = []
+    for i, dialog in enumerate(dialogs):
+        example = {'text': dialog, 'task_id': dataset[i][id_col_name]}
+        final_dataset.append(example)
+    dataset = final_dataset
+    return dataset
 
 def prepare_test_code(example):
     setup_code = example['test_setup_code']
@@ -227,121 +265,90 @@ def prepare_meqsum_user_prompt(task_example, prompt_dataset, k_shot_idxs):
     prompt = '\n'.join(prompt)
     return {'prompt': prompt}
 
-def get_data(args, ins_root):
-    if args.dataset == "xsum":
-        dataset = load_dataset("xsum")["test"]
-        def prepend(batch):
-            batch["text"] = [ins_root + t + " \nSummary: " for t in batch["document"]]
-            return batch
+def prepare_summarization_user_prompt(task_example, dataset='cnn_dailymail'):
+    """Prepares user portion of the prompt. The system prompt will be prepended
+    to the user prompt at a later stage.
+    """
+    template = 'Summarize the following document:\n{}'
+    # add task to be completed
+    if dataset == 'cnn_dailymail':
+        doc_col = 'article'
+    elif dataset == 'xsum':
+        doc_col = 'document'
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+    task = task_example[doc_col]
+    prompt = template.format(task)
+    return {'prompt': prompt}
 
-        dataset = dataset.map(prepend, batched=True)
-        dataset = dataset.with_format("torch")["text"]
-
-    elif args.dataset == "full_chat":
+def get_data(args, instruction=None):
+    if args.dataset == "full_chat":
         dataset = load_dataset("Anthropic/hh-rlhf")["test"]
-        def prepend(batch):
-            batch["text"] = [ins_root + t.split("Human: ")[1].split("\n")[0] + " \nChatbot Response:" for t in batch["rejected"]]
-            return batch
-
-        dataset = dataset.map(prepend, batched=True)
-        dataset = dataset.with_format("torch")["text"]
-
+        # create an id column ranging from 0 to len(dataset)
+        ids = list(range(len(dataset)))
+        dataset = dataset.add_column('task_id', ids)
+        dataset = subset_ensure_unique(dataset, args.n_total, text_col_name='rejected')
+        # if embed only, extract user portion of the chat
+        if args.embed:
+            dataset = dataset.map(lambda x: {'text': extract_user_portion(x['rejected'])}, batched=False)
+            return dataset, None
+        dataset = dataset.map(prepare_chat_user_prompt, batched=False, fn_kwargs={'chat_col_name': 'rejected'})
+        dataset = prepare_complete_chat_input(args, dataset, instruction)
     elif args.dataset == "red_team_chat":
-        dataset = load_dataset("Anthropic/hh-rlhf", data_dir="red-team-attempts")
-        def prepend(batch):
-            batch["text"] = [ins_root + t.split("Human: ")[1].split("\n")[0] + " \nChatbot Response:" for t in batch["transcript"]]
-            return batch
-
-        dataset = dataset.map(prepend, batched=True)
-        dataset = dataset.with_format("torch")["train"]["text"]
-        
-    elif args.dataset == "pubmed_qa":
-        dataset = load_dataset("pubmed_qa", "pqa_artificial")["train"]
-        def prepend(batch):
-            data = dict()
-            data["text"] = [ins_root + batch["question"][t] + " \nAnswer 'no' or 'yes': " + "$" + batch["final_decision"][t] for t in range(len(batch["question"]))]
-            data["text"] = [t.split("$")[0] for t in data["text"]]
-            return data
-
-        dataset = dataset.map(prepend, batched=True)
-        dataset = dataset.with_format("torch")
-        dataset = dataset["text"]
-
-    elif args.dataset == "healthcare":
-        dataset = load_dataset("wangrongsheng/HealthCareMagic-100k-en")["train"]
-        def prepend(batch):
-            data = dict()
-            data["text"] = [
-                (ins_root + b + "\nProvide a detailed response in one paragraph: ")
-                for b in batch["input"]
-            ]
-            data["output"] = batch["output"]
-            return data
-
-        dataset = dataset.map(prepend, batched=True)
-        dataset = dataset.with_format("torch")["text"]
-    
+        dataset = load_dataset("Anthropic/hh-rlhf", data_dir="red-team-attempts", split="train")
+        # create an id column ranging from 0 to len(dataset)
+        ids = list(range(len(dataset)))
+        dataset = dataset.add_column('task_id', ids)
+        dataset = subset_ensure_unique(dataset, args.n_total, text_col_name='transcript')
+        # if embed only, extract user portion of the chat
+        if args.embed:
+            dataset = dataset.map(lambda x: {'text': extract_user_portion(x['transcript'])}, batched=False)
+            return dataset, None
+        dataset = dataset.map(prepare_chat_user_prompt, batched=False, fn_kwargs={'chat_col_name': 'transcript'})
+        dataset = prepare_complete_chat_input(args, dataset, instruction)
     elif args.dataset == "bigbio/meqsum":
-        dataset = load_dataset("bigbio/meqsum", "meqsum_source")['train']
+        dataset = load_dataset("bigbio/meqsum", "meqsum_source", split="train")
         prompt_dataset = dataset.filter(lambda x: x['File'] in MEQSUM_PROMPT_FILES)
         dataset = dataset.filter(lambda x: x['File'] not in MEQSUM_PROMPT_FILES)
-        # take instruction and potential k-shots and format them into a formatted dialog
-        system_prompt = ins_root['instruction']
-        k_shot_idxs = ins_root['k_shot_idxs'] if 'k_shot_idxs' in ins_root else []
+        dataset = subset_ensure_unique(dataset, args.n_total, text_col_name='CHQ')
+        # prepare user prompt, potentially prepending with k-shot examples
+        k_shot_idxs = instruction['k_shot_idxs'] if 'k_shot_idxs' in instruction else []
         dataset = dataset.map(prepare_meqsum_user_prompt, batched=False, fn_kwargs={'prompt_dataset': prompt_dataset, 'k_shot_idxs': k_shot_idxs})
-        # if llama model, format accordingly
-        if 'llama' in args.model_name_or_path:
-            system_message = {'role': 'system', 'content': system_prompt}
-            # prepare the dialogs by combining the system prompt with the user prompt
-            dialogs = []
-            for example in dataset:
-                dialog = [system_message]
-                dialog.append({'role': 'user', 'content': example['prompt']})
-                dialogs.append(dialog)
-            
-            dialogs = prepare_chats(dialogs)
-        else: # e.g. Falcon model
-            dialogs = []
-            for example in dataset:
-                dialog = system_prompt.strip() + '\n\n' + example['prompt']
-                dialogs.append(dialog)
-
-        # retain the task_id (i.e. the File) for each example
-        final_dataset = []
-        for i, dialog in enumerate(dialogs):
-            example = {'text': dialog, 'task_id': dataset[i]['File']}
-            final_dataset.append(example)
-        dataset = final_dataset
-
+        dataset = prepare_complete_chat_input(args, dataset, instruction, id_col_name='File')
     elif args.dataset == "mbpp":
+        if 'codellama' not in args.model_name_or_path:
+            raise ValueError("mbpp dataset is only supported for codellama models. If other models are needed, format the prompts accordingly.")
         dataset = load_dataset("mbpp")
         # task_id 1-10
         prompt_dataset = dataset['prompt']
         # concat train, validation, and test portions
         dataset = concatenate_datasets([dataset["train"], dataset["validation"], dataset["test"]])
-        if 'codellama' not in args.model_name_or_path:
-            raise ValueError("mbpp dataset is only supported for codellama models. If other models are needed, format the prompts accordingly.")
-        
-        # take instruction and potential k-shots and format them into a formatted dialog for code llama
-        system_prompt = ins_root['instruction']
-        system_message = {'role': 'system', 'content': system_prompt}
-        k_shot_idxs = ins_root['k_shot_idxs'] if 'k_shot_idxs' in ins_root else []
+        dataset = subset_ensure_unique(dataset, args.n_total, text_col_name='text')
+        # prepare user prompt, potentially prepending with k-shot examples
+        k_shot_idxs = instruction['k_shot_idxs'] if 'k_shot_idxs' in instruction else []
         dataset = dataset.map(prepare_mbpp_user_prompt, batched=False, fn_kwargs={'prompt_dataset': prompt_dataset, 'k_shot_idxs': k_shot_idxs})
-        # prepare the dialogs by combining the system prompt with the user prompt
-        dialogs = []
-        for example in dataset:
-            dialog = [system_message]
-            dialog.append({'role': 'user', 'content': example['prompt']})
-            dialogs.append(dialog)
-        
-        dialogs = prepare_chats(dialogs)
-        # retain the task_id for each example
-        final_dataset = []
-        for i, dialog in enumerate(dialogs):
-            example = {'text': dialog, 'task_id': dataset[i]['task_id']}
-            final_dataset.append(example)
-        dataset = final_dataset
-
+        dataset = prepare_complete_chat_input(args, dataset, instruction)
+    elif args.dataset == 'cnn_dailymail':
+        dataset = load_dataset('cnn_dailymail', name='3.0.0', split='train')
+        dataset = subset_ensure_unique(dataset, args.n_total, text_col_name='article')
+        # this is an embedding use case so simply return the dataset without further formatting
+        if args.embed:
+            # rename 'article' to 'text' for ease downstream
+            dataset = dataset.rename_column('article', 'text')
+            dataset = dataset.rename_column('id', 'task_id')
+            return dataset, None
+        dataset = dataset.map(prepare_summarization_user_prompt, batched=False, fn_kwargs={'dataset': 'cnn_dailymail'})
+        dataset = prepare_complete_chat_input(args, dataset, instruction, id_col_name='id')
+    elif args.dataset == 'xsum':
+        dataset = load_dataset("xsum", split="train")
+        dataset = subset_ensure_unique(dataset, args.n_total, text_col_name='document')
+        if args.embed:
+            # rename 'document' to 'text' for ease downstream
+            dataset = dataset.rename_column('document', 'text')
+            dataset = dataset.rename_column('id', 'task_id')
+            return dataset, None
+        dataset = dataset.map(prepare_summarization_user_prompt, batched=False, fn_kwargs={'dataset': 'xsum'})
+        dataset = prepare_complete_chat_input(args, dataset, instruction, id_col_name='id')
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -350,18 +357,16 @@ def get_data(args, ins_root):
     )
     return dataset, dataloader
 
-
 def get_datasets_dataloaders(instructions, cache_df, args, return_dataloaders=False):
     datasets = []
     dataloaders = []
-    for instruction in tqdm(instructions, desc="instructions"):
+    for instruction in tqdm(instructions, desc="Instructions"):
         set_seeds(args.seed)
-        ins_root = get_instruction_root(args, instruction)
         # dataset is a list of text examples, dataloader is a DataLoader
-        dataset, dataloader = get_data(args, ins_root)
+        dataset, dataloader = get_data(args, instruction)
         # check if any of the text examples are duplicated
         # if so, warn user that they will be removed
-        # can only check against hashale types (e.g., strings, etc.)
+        # can only check against hashable types (e.g., strings, etc.)
         if isinstance(dataset[0], str):
             unique = set(dataset)
             n_unique = len(unique)
@@ -440,10 +445,132 @@ def tgi_prediction_pipeline(dataset, cache_df, args):
     cache_df = cache_df[col_order]
     return cache_df
 
+def embed(args, save_folder, model_name):
+    # load the dataset
+    dataset, _ = get_data(args, instruction=None)
+    
+    # TODO: keep track of what we've already computed
+    # though this might be so fast that it doesn't matter if we recompute
+    model = SentenceTransformer(args.model_name_or_path)
+
+    # encode documents with specified number of gpus
+    target_devices = [f'cuda:{i}' for i in range(args.num_gpus)]
+    pool = model.start_multi_process_pool(target_devices)
+
+    # compute the embeddings using the multi-process pool
+    start = time.perf_counter()
+    emb = model.encode_multi_process(dataset['text'], pool)
+    end = time.perf_counter()
+    print(f"Embeddings computed embeddings with shape {emb.shape} in {end - start:.2f} seconds. Time per example: {(end - start) / len(dataset):.2f} seconds.")
+
+    # stop the proccesses in the pool
+    model.stop_multi_process_pool(pool)
+    
+    # save the embeddings as csv
+    df = pd.DataFrame()
+    df['embedding'] = emb.tolist()
+    df['task_id'] = dataset['task_id']
+    df.to_csv(os.path.join(save_folder, f'{model_name}_embeddings.csv'), index=False)
+    
+
+def generate_outputs(args, save_folder, model_name):
+    """This is the main pipeline for generating outputs for a given dataset and
+    model."""
+    csv_path = os.path.join(save_folder, f'{model_name}_predictions.csv')
+    # load the cache
+    if os.path.exists(csv_path) and not args.no_cache:
+        # load the existing csv
+        cache_df = pd.read_csv(csv_path)
+        # if hypothesis column is a dict string, convert it back to a dict
+        # so we can properly check if any of the text examples have already been processed
+        cache_df['hypothesis'] = cache_df['hypothesis'].apply(eval)
+        if 'seed' not in cache_df.columns:
+            # NB: this is a late addition in order to support multiple seeds
+            # without having to rerun old experiments that didn't have a seed column
+            # add a seed column
+            cache_df['seed'] = args.seed
+    else:
+        cache_df = pd.DataFrame()
+    
+    # prepare the datasets
+    instructions = get_instructions(args, instruction_sets)[:args.num_hypotheses]
+    assert len(instructions) == args.num_hypotheses
+    # dataloaders might be useful if we need to run native PyTorch models
+    # this set will check if any of the text examples have already been
+    # processed and only returns data that needs to be processed
+    datasets, dataloaders = get_datasets_dataloaders(instructions, cache_df, args)
+    
+    # if all datasets are empty (i.e. all text examples have already been processed), exit
+    if all([len(d) == 0 for d in datasets]):
+        print(f"All {args.n_total} requested text examples have already been processed for dataset {args.dataset}")
+        return
+
+    # tokenize the dataset and check the token distribution
+    # so we can set the max input length and max total tokens appropriately
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    # only retain datasets that have at least one text example
+    datasets = [d for d in datasets if len(d) > 0]
+    # get max length of the dataset among all text examples
+    max_len = 0
+    for idx, d in enumerate(datasets):
+        sample_dataset = [x['text'] for x in d]
+        tokenized = tokenizer(sample_dataset, padding=False, truncation=False,)
+        lens = [len(t) for t in tokenized['input_ids']]
+        desc_df = pd.DataFrame({'len': lens})
+        stats = desc_df.describe()
+        max_len = max(max_len, int(stats.loc['max', 'len']))
+        if idx == 0:
+            print(f'Token distribution for dataset {args.dataset}:')
+            print(stats)
+    print(f"Max length across all prompts in datasets: {max_len,}")
+    # set max_input_tokens to max length + 100 to account for special tokens and any variation in prompts
+    args.max_input_length = max_len + 100
+    # set max_total_tokens min of 3x max_input_tokens and 4096
+    args.max_total_tokens = min(args.max_input_length * 3, 4096)
+    args.max_new_tokens = args.max_total_tokens - args.max_input_length
+    print(f"Max input length: {args.max_input_length:,}")
+    print(f"Max total tokens: {args.max_total_tokens:,}")
+    
+    args.max_concurrent_requests = 128 # default
+    if 'flan-t5' in args.model_name_or_path:
+        # set max batch total tokens manually because TGI won't do it automatically for T5 models
+        # this was set somewhat experimentally
+        args.max_concurrent_requests = 200
+        args.max_batch_total_tokens = min(args.max_total_tokens*args.max_concurrent_requests, 50_000)
+    if 'lama' in args.model_name_or_path:
+        # may need to increase max length for particularly long prompts
+        # see https://huggingface.co/docs/text-generation-inference/basic_tutorials/preparing_model
+        if args.max_input_length + 512 > 4096:
+            new_max = args.max_input_length + 512
+            print(f"Warning: max input length of {args.max_input_length:,} leaves little (or no) room for generation. Increasing max_total_tokens to {new_max:,} with RoPE scaling.")
+            args.max_total_tokens = new_max
+            args.rope_scaling = 'dynamic'
+            args.rope_factor = new_max / 4096
+    # start the text-generation-inference server with the specified model
+    container = start_server(args)
+    # get the max batch size
+    args.max_batch_size = get_batch_size(container, args.max_total_tokens, args.max_concurrent_requests)
+
+    # run predictions for all datasets
+    for dataset in datasets:
+        if 'codellama' in args.model_name_or_path:
+            # include [/PYTHON] and </s> in the stop tokens
+            args.stop = ['[/PYTHON]', '</s>']
+            # following the codellama paper: https://arxiv.org/pdf/2308.12950.pdf
+            args.top_p = 0.95
+            args.temperature = 0.8
+        if args.dataset == 'bigbio/meqsum':
+            # include [/SUMMARY] and </s> in the stop tokens
+            args.stop = ['[/SUMMARY]', tokenizer.eos_token]
+        cache_df = tgi_prediction_pipeline(dataset, cache_df, args)
+        # save csv the predictions
+        cache_df.to_csv(csv_path, index=False)
+
+    # stop the server so we can reconfigure it for the next dataset
+    # stop the server
+    stop_server(container)
 
 def main(args):
-    # TODO: extract this into a generate_outputs function that can be called from other scripts
-    print(args, "\n")
     set_seeds(args.seed)
 
     # set HF token to ensure access to llama 2 models
@@ -454,7 +581,6 @@ def main(args):
         args.datasets = [args.dataset]
 
     # TODO: add support for multiple models
-    container = None
     for dataset_ in args.datasets:
         args.dataset = dataset_
         # define output folder and cache csv path
@@ -462,102 +588,14 @@ def main(args):
         save_folder = os.path.join(args.output_dir, dataset_dir)
         os.makedirs(save_folder, exist_ok=True)
         model_name = args.model_name_or_path.replace("/", "-")
-        csv_path = os.path.join(save_folder, f'{model_name}_predictions.csv')
 
-        # load the cache
-        if os.path.exists(csv_path) and not args.no_cache:
-            # load the existing csv
-            cache_df = pd.read_csv(csv_path)
-            # if hypothesis column is a dict string, convert it back to a dict
-            # so we can properly check if any of the text examples have already been processed
-            cache_df['hypothesis'] = cache_df['hypothesis'].apply(eval)
-            if 'seed' not in cache_df.columns:
-                # NB: this is a late addition in order to support multiple seeds
-                # without having to rerun old experiments that didn't have a seed column
-                # add a seed column
-                cache_df['seed'] = args.seed
+        # major branch in pipeline: either generate outputs or embed the dataset
+        if args.embed:
+            # embed the dataset
+            embed(args, save_folder, model_name)
         else:
-            cache_df = pd.DataFrame()
-        
-        # prepare the datasets
-        instructions = get_instructions(args, instruction_sets)[:args.num_hypotheses]
-        assert len(instructions) == args.num_hypotheses
-        # dataloaders might be useful if we need to run native PyTorch models
-        # this set will check if any of the text examples have already been
-        # processed and only returns data that needs to be processed
-        datasets, dataloaders = get_datasets_dataloaders(instructions, cache_df, args)
-        
-        # if all datasets are empty (i.e. all text examples have already been processed), exit
-        if all([len(d) == 0 for d in datasets]):
-            print(f"All {args.n_total} requested text examples have already been processed for dataset {args.dataset}")
-            continue
-
-        # tokenize the dataset and check the token distribution
-        # so we can set the max input length and max total tokens appropriately
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-        # only retain datasets that have at least one text example
-        datasets = [d for d in datasets if len(d) > 0]
-        # get max length of the dataset among all text examples
-        max_len = 0
-        for idx, d in enumerate(datasets):
-            sample_dataset = [x['text'] for x in d]
-            tokenized = tokenizer(sample_dataset, padding=False, truncation=False,)
-            lens = [len(t) for t in tokenized['input_ids']]
-            desc_df = pd.DataFrame({'len': lens})
-            stats = desc_df.describe()
-            max_len = max(max_len, int(stats.loc['max', 'len']))
-            if idx == 0:
-                print(f'Token distribution for dataset {args.dataset}:')
-                print(stats)
-        print(f"Max length across all prompts in datasets: {max_len}")
-        # set max_input_tokens to max length + 100 to account for special tokens and any variation in prompts
-        args.max_input_length = max_len + 100
-        # set max_total_tokens min of 3x max_input_tokens and 4096
-        args.max_total_tokens = min(args.max_input_length * 3, 4096)
-        args.max_new_tokens = args.max_total_tokens - args.max_input_length
-        print(f"Max input length: {args.max_input_length:,}")
-        print(f"Max total tokens: {args.max_total_tokens:,}")
-        
-        if args.use_tgi:
-            args.max_concurrent_requests = 128 # default
-            if 'flan-t5' in args.model_name_or_path:
-                # set max batch total tokens manually because TGI won't do it automatically for T5 models
-                # this was set somewhat experimentally
-                args.max_concurrent_requests = 200
-                args.max_batch_total_tokens = min(args.max_total_tokens*args.max_concurrent_requests, 50_000)
-            if 'codellama' in args.model_name_or_path:
-                # may need to increase max length for particularly long prompts
-                # see https://huggingface.co/docs/text-generation-inference/basic_tutorials/preparing_model
-                if args.max_input_length + 512 > 4096:
-                    new_max = args.max_input_length + 512
-                    print(f"Warning: max input length of {args.max_input_length:,} leaves little (or no) room for generation. Increasing max_total_tokens to {new_max:,} with RoPE scaling.")
-                    args.max_total_tokens = new_max
-                    args.rope_scaling = 'dynamic'
-                    args.rope_factor = new_max / 4096
-            # start the text-generation-inference server with the specified model
-            container = start_server(args)
-            # get the max batch size
-            args.max_batch_size = get_batch_size(container, args.max_total_tokens, args.max_concurrent_requests)
-
-        # run predictions for all datasets
-        for dataset in datasets:
-            if 'codellama' in args.model_name_or_path:
-                # include [/PYTHON] and </s> in the stop tokens
-                args.stop = ['[/PYTHON]', '</s>']
-                # following the codellama paper: https://arxiv.org/pdf/2308.12950.pdf
-                args.top_p = 0.95
-                args.temperature = 0.8
-            if args.dataset == 'bigbio/meqsum':
-                # include [/SUMMARY] and </s> in the stop tokens
-                args.stop = ['[/SUMMARY]', tokenizer.eos_token]
-            cache_df = tgi_prediction_pipeline(dataset, cache_df, args)
-            # save csv the predictions
-            cache_df.to_csv(csv_path, index=False)
-
-        # stop the server so we can reconfigure it for the next dataset
-        if args.use_tgi:
-            # stop the server
-            stop_server(container)
+            # generate outputs
+            generate_outputs(args, save_folder, model_name)
 
 if __name__ == "__main__":
     # merge the Docker/TGI args with the main args

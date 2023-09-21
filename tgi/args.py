@@ -12,7 +12,7 @@ def parse_args(passed_args=None, known_only=False):
     parser.add_argument(
         '--dtype',
         type=str,
-        default='float32',
+        default='float16',
         help=
         'float32, float16, or bfloat16. Note that bfloat16 won\'t be available on older GPUs (e.g. V100s)'
     )

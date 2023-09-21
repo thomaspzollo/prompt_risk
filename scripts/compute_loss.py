@@ -17,8 +17,12 @@ Examples:
         --output-dir output \
         --datasets bigbio/meqsum \
         --loss-fn rouge
+
+    $ python -m scripts.compute_loss \
+        --output-dir output \
+        --datasets cnn_dailymail \
+        --loss-fn rouge
 """
-import argparse
 import math
 import os
 import time
@@ -33,7 +37,7 @@ import torch
 from detoxify import Detoxify
 from prompt_risk.instructions import MEQSUM_PROMPT_FILES
 
-from scripts.generate_outputs import prepare_test_code
+from scripts.generate_outputs import extract_user_portion, prepare_test_code, subset_ensure_unique
 from scripts.args import parse_args
 from .code_eval.evaluation import evaluate_functional_correctness, calculate_pass_at_k
 
@@ -64,68 +68,6 @@ def get_scorer(args):
         raise ValueError
     return scorer
 
-def get_scores(args, scorer, chat_out, batch):
-
-    if args.loss_fn == "toxicity":
-        tox_out = scorer.predict(chat_out)
-        scores = torch.hstack([torch.Tensor(v).unsqueeze(1) for v in tox_out.values()])
-        scores = torch.max(scores,-1)[0].detach().cpu().tolist()
-
-    elif args.loss_fn == "bertscore":
-        if args.dataset == "healthcare":
-            refs = batch["output"]
-        else:
-            refs = batch["summary"]
-
-        for k in range(len(chat_out)):
-            print(k)
-            print()
-            print(refs[k])
-            print()
-            print(chat_out[k])
-            e += 7
-        scores = scorer.compute(
-            predictions=chat_out,
-            references=refs,
-            lang="en",
-            device=args.device,
-        )["f1"]
-        scores = list(1-np.array(scores))
-        scores = list(scores)
-
-    elif args.loss_fn == "rouge":
-        scores = scorer.compute(
-            predictions=chat_out,
-            references=batch["output"],
-            use_aggregator=False
-        )["rougeL"]
-        print(scores)
-        e += 7
-        scores = list(1-np.array(scores))
-        scores = list(scores)
-
-    elif args.loss_fn == "accuracy":
-
-        preds = [c.lower() for c in chat_out]
-        labels = [b.split("$")[1].lower() for b in batch]
-        assert len(preds) == len(labels)
-        # print(preds, labels)
-        scores = []
-        for i in range(len(labels)):
-
-            if preds[i] != labels[i]:
-                scores.append(1.0)
-            else:
-                scores.append(0.0)
-
-            if preds[i] not in ["yes", "no"]:
-                print("Warning, bad output:", preds[i])
-
-    else:
-        raise NotImplementedError
-
-    return scores
-
 def compute_chat_loss(df, reward_model_pipeline, args):
     final_loss_col = "weqweasdas/hh_rlhf_rm_open_llama_3b_eval_reward_med_sigmoid"
     dataset = df['dataset'].iloc[0]
@@ -138,12 +80,33 @@ def compute_chat_loss(df, reward_model_pipeline, args):
         # lazy load the reward model pipeline
         print("Loading reward model pipeline...")
         reward_model_pipeline = get_scorer(args)
-        
-    # human input is between Here is a human input: and \nChatbot Response: 
-    df['human_input'] = df['text'].str.split('Here is a human input: ').str[1].str.split('\nChatbot Response:').str[0].str.strip()
+    
+    # load original dataset to get human input
+    if args.dataset == 'full_chat':
+        dataset = load_dataset("Anthropic/hh-rlhf")["test"]
+        # create an id column ranging from 0 to len(dataset)
+        ids = list(range(len(dataset)))
+        dataset = dataset.add_column('task_id', ids)
+        dataset = subset_ensure_unique(dataset, n_total=None, text_col_name='rejected')
+        dataset = dataset.map(lambda x: {'human_input': extract_user_portion(x['rejected'])}, batched=False)
+        label_df = dataset.to_pandas()[['task_id', 'human_input']]
+    elif args.dataset == 'red_team_chat':
+        dataset = load_dataset("Anthropic/hh-rlhf", data_dir="red-team-attempts", split="train")
+        # create an id column ranging from 0 to len(dataset)
+        ids = list(range(len(dataset)))
+        dataset = dataset.add_column('task_id', ids)
+        dataset = subset_ensure_unique(dataset, None, text_col_name='transcript')
+        dataset = dataset.map(lambda x: {'human_input': extract_user_portion(x['transcript'])}, batched=False)
+        label_df = dataset.to_pandas()[['task_id', 'human_input']]
+    # join on task_id
+    original_len = len(df)
+    df = df.merge(label_df, on="task_id", how="left")
+    assert len(df) == original_len, f"Expected {original_len} rows, got {len(df)} rows"
+    assert df['human_input'].isna().sum() == 0, "Some rows are missing human input"
+
     # generated_text is model output
     # prepend 'human_input' column with '###Human: ', prepend 'generated_text' column with '###Assistant: ', then concatenate
-    df['weqweasdas/hh_rlhf_rm_open_llama_3b_eval_text'] = '###Human: ' + df['human_input'].astype(str) + ' ###Assistant: ' + df['generated_text'].astype(str)
+    df['weqweasdas/hh_rlhf_rm_open_llama_3b_eval_text'] = '###Human: ' + df['human_input'].astype(str).str.strip() + ' ###Assistant: ' + df['generated_text'].astype(str).str.strip()
 
     # compute loss
     pipe_kwargs = {
@@ -166,8 +129,8 @@ def compute_chat_loss(df, reward_model_pipeline, args):
     # pass through a shifted sigmoid with center at median and scale to [0,1]
     median = df['weqweasdas/hh_rlhf_rm_open_llama_3b_eval_reward'].median()
     df[final_loss_col] = 1 / (1 + df['weqweasdas/hh_rlhf_rm_open_llama_3b_eval_reward'].apply(lambda x: math.exp(-1*(x-median))))
+    df = df.drop(columns=['human_input'], errors='ignore')
     return df, reward_model_pipeline
-
 
 def score_mbpp_predictions(df):
     # TODO: create unified interface for loading data the same way in compute_loss.py and generate_outputs.py
@@ -243,6 +206,35 @@ def score_meqsum_predictions(df, scorer):
     df = df.drop(columns=['CHQ', 'Summary'], errors='ignore')
     return df
 
+def score_summarization_predictions(df, scorer, dataset='cnn_dailymail'):
+    # load reference summaries
+    if dataset == 'cnn_dailymail':
+        dataset = load_dataset('cnn_dailymail', name='3.0.0', split='train')
+        dataset = subset_ensure_unique(dataset, n_total=None, text_col_name='article')
+        dataset = dataset.rename_column('id', 'task_id')
+        dataset = dataset.rename_column('highlights', 'summary')
+        label_df = dataset.to_pandas()[['task_id', 'summary']]
+    elif dataset == 'xsum':
+        dataset = load_dataset("xsum", split="train")
+        dataset = subset_ensure_unique(dataset, n_total=None, text_col_name='document')
+        dataset = dataset.rename_column('id', 'task_id')
+        label_df = dataset.to_pandas()[['task_id', 'summary']]
+        label_df['task_id'] = label_df['task_id'].astype(int)
+    # merge with predictions on task_id
+    original_len = len(df)
+    df = df.merge(label_df, on="task_id", how="left")
+    assert len(df) == original_len, f"Expected {original_len} rows, got {len(df)} rows"
+    assert df['summary'].isna().sum() == 0, "Some rows are missing human input"
+    rouge_scores = scorer.compute(predictions=df['generated_text'].tolist(), references=df['summary'].tolist(), use_aggregator=False)
+    # extract rougeL scores
+    rougeL_scores = rouge_scores['rougeL']
+    # add rougeL scores to df
+    df['rougeL'] = rougeL_scores
+    # drop 'summary' column
+    df = df.drop(columns=['summary'], errors='ignore')
+    return df
+
+
 
 def main(args):
     # TODO: extract this into a function that can be called from other scripts
@@ -264,6 +256,8 @@ def main(args):
             files = [f for f in files if f.endswith(".csv")]
         else:
             files = [f"{m}_predictions.csv" for m in models]
+        # filter out any embeddings files
+        files = [f for f in files if not f.endswith("embeddings.csv")]
         dfs = {}
         for f in files:
             model_id = f.split("_predictions.csv")[0]
@@ -300,6 +294,12 @@ def main(args):
                 scorer = get_scorer(args)
                 dfs[model_id] = score_meqsum_predictions(dfs[model_id], scorer)
                 scorer = None # in case we need to load a different scorer for the next dataset
+                print(f'Average rougeL score on {args.dataset} - {model_id}: {dfs[model_id]["rougeL"].mean():.4f}')
+            elif args.dataset in ['cnn_dailymail', 'xsum']:
+                # score summarization predictions
+                scorer = get_scorer(args)
+                dfs[model_id] = score_summarization_predictions(dfs[model_id], scorer, dataset=args.dataset)
+                scorer = None
                 print(f'Average rougeL score on {args.dataset} - {model_id}: {dfs[model_id]["rougeL"].mean():.4f}')
 
             # save back to the same file

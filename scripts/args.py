@@ -12,6 +12,7 @@ def parse_args(passed_args=None, known_only=False):
     #     default=42,
     #     help="random seed"
     # )
+    parser.add_argument('--embed', action='store_true', default=False, help='Embed the generated text instead of generating text predictions.')
     parser.add_argument(
         "--max-gen-len",
         type=int,
@@ -35,7 +36,7 @@ def parse_args(passed_args=None, known_only=False):
         help="dataset for experiments"
     )
     parser.add_argument('--datasets', nargs='+', default=[], help='Datasets to evaluate on.')
-    parser.add_argument('--use-tgi', action='store_true', default=False, help='Use the text-generation-inference server to serve the model.')
+    # parser.add_argument('--use-tgi', action='store_true', default=False, help='Use the text-generation-inference server to serve the model.')
     parser.add_argument(
         "--model-size",
         default="base",
@@ -77,6 +78,8 @@ def parse_args(passed_args=None, known_only=False):
     parser.add_argument('--no-cache', action='store_true', default=False, help='Do not use cached results.')
     parser.add_argument('--eval-models', nargs='+', default=[], help='Models to evaluate on.')
     parser.add_argument('--num-return-sequences', type=int, default=1, help='Number of sequences to return from the server. While TGI doesn\'t implement this, we simulate this by calling the server multiple times with different random seeds.')
+    parser.add_argument('--s3-bucket-name', type=str, default='prompt-risk-control', help='S3 bucket name to upload to.')
+    parser.add_argument('--s3-prefix', type=str, default='', help='S3 prefix to upload to.')
     if passed_args is not None:
         if known_only:
             args, unknown_args = parser.parse_known_args(passed_args)

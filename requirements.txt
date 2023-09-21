@@ -14,3 +14,5 @@ detoxify
 bert_score
 openpyxl
 rouge_score
+sentence-transformers
+boto3
