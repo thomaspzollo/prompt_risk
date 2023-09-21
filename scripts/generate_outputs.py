@@ -52,11 +52,12 @@ import os
 import random
 from argparse import Namespace
 import time
+import hashlib
 
 import numpy as np
 import pandas as pd
 import torch
-from datasets import load_dataset, concatenate_datasets, Dataset
+from datasets import load_dataset, concatenate_datasets, Dataset, Value
 from sentence_transformers import SentenceTransformer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -153,6 +154,7 @@ def subset_ensure_unique(dataset, n_total, text_col_name='text', shuffle=True):
     # clip to requested number of examples    
     if len(dataset) < n_total:
         print(f"Warning: {n_total:,} examples requested but only {len(dataset):,} examples available. Using {len(dataset):,} examples.")
+        n_total = len(dataset)
     dataset_slice = slice(0, n_total)
     if isinstance(dataset, pd.DataFrame):
         dataset = dataset.iloc[dataset_slice]
@@ -341,6 +343,10 @@ def get_data(args, instruction=None):
         dataset = prepare_complete_chat_input(args, dataset, instruction, id_col_name='id')
     elif args.dataset == 'xsum':
         dataset = load_dataset("xsum", split="train")
+        # cast id column to int so we can ensure the cache works correctly
+        new_features = dataset.features.copy()
+        new_features['id'] = Value('int64')
+        dataset = dataset.cast(new_features)
         dataset = subset_ensure_unique(dataset, args.n_total, text_col_name='document')
         if args.embed:
             # rename 'document' to 'text' for ease downstream
@@ -356,6 +362,18 @@ def get_data(args, instruction=None):
         num_workers=2
     )
     return dataset, dataloader
+
+def hash_row(row, cols):
+    """Hash row based on specified columns for faster cache checking."""
+    if isinstance(row, dict):
+        values = [row[col] for col in cols]
+        row_str = '|'.join([str(x) for x in values])
+    else:
+        row = row[cols]
+        row_str = '|'.join([str(x) for x in row.values])
+    row_bytes = row_str.encode('utf-8')
+    row_hash = hashlib.sha256(row_bytes).hexdigest()
+    return row_hash
 
 def get_datasets_dataloaders(instructions, cache_df, args, return_dataloaders=False):
     datasets = []
@@ -400,19 +418,22 @@ def get_datasets_dataloaders(instructions, cache_df, args, return_dataloaders=Fa
         # check if any of the text examples + instruction + seed have already been processed
         # if so, remove them from the to-be-processed list
         if not cache_df.empty:
+            # assume all examples have the same columns
+            cols = list(dataset[0].keys())
+            if 'hash' not in cache_df.columns:
+                cache_df['hash'] = cache_df.apply(lambda x: hash_row(x, cols), axis=1)
+            hash_vals = set(cache_df['hash'].values)
             num_examples = len(dataset)
+            data_df = pd.DataFrame(dataset)
+            data_hash_vals = data_df.apply(lambda x: hash_row(x, cols), axis=1)
             final_dataset = []
-            for example in dataset:
-                # check all columns except for the generated_text column
-                mask = True
-                for col in example:
-                    mask &= (cache_df[col] == example[col])
-                # if no row matches, add the example to the final dataset, which needs to be processed
-                if not mask.any():
-                    final_dataset.append(example)
+            # check if any of the examples have already been processed
+            for i, hash_val in enumerate(data_hash_vals):
+                if hash_val not in hash_vals:
+                    final_dataset.append(dataset[i])
             dataset = final_dataset
             print(f"Skipping {num_examples - len(dataset)}/{num_examples} examples that were already run.")
-        
+            
         datasets.append(dataset)
         if return_dataloaders:
             dataloaders.append(dataloader)
@@ -522,7 +543,7 @@ def generate_outputs(args, save_folder, model_name):
         if idx == 0:
             print(f'Token distribution for dataset {args.dataset}:')
             print(stats)
-    print(f"Max length across all prompts in datasets: {max_len,}")
+    print(f"Max length across all prompts in datasets: {max_len:,}")
     # set max_input_tokens to max length + 100 to account for special tokens and any variation in prompts
     args.max_input_length = max_len + 100
     # set max_total_tokens min of 3x max_input_tokens and 4096

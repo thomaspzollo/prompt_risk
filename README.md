@@ -67,6 +67,12 @@ text-generation-benchmark --sequence-length 2048 --decode-length 200 --runs 5 --
 ```
 
 ## Make predictions
+To run all experiments + evaluations, run:
+```bash
+nohup ./run.sh \
+> run.log 2>&1 &
+```
+
 Run Red Team Chat on Flan-T5:
 ```bash
 nohup python -u -m scripts.generate_outputs \

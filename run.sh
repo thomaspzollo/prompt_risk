@@ -2,146 +2,172 @@
 
 # full_chat tests
 # embed
+echo "Embedding full_chat"
 python -u -m scripts.generate_outputs \
     --datasets full_chat \
     --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
     --num-gpus 4 \
-    --n-total 20 \
-    --batch-size 20 \
+    --n-total 5000 \
+    --batch-size 1000 \
     --seed 42 \
     --embed
 
 # generate with flan-t5
-python -m scripts.generate_outputs \
+echo "Generating full_chat with flan-t5-xxl"
+python -u -m scripts.generate_outputs \
     --datasets full_chat \
-    --model-name-or-path google/flan-t5-xl \
-    --num-gpus 1 \
+    --model-name-or-path google/flan-t5-xxl \
+    --num-gpus 4 \
     --print-container-logs \
-    --n-total 20 \
-    --num-hypotheses 2 \
+    --n-total 2000 \
+    --num-hypotheses 50 \
     --seed 42
 
 # eval full_chat
-python -m scripts.compute_loss \
+echo "Evaluating full_chat"
+python -u -m scripts.compute_loss \
     --output-dir output \
     --datasets full_chat \
     --loss-fn weqweasdas/hh_rlhf_rm_open_llama_3b \
-    --batch-size 30 \
-    --eval-models google/flan-t5-xl
+    --batch-size 5 \
+    --eval-models google/flan-t5-xxl
 
 # red_team_chat tests
 # embed
+echo "Embedding red_team_chat"
 python -u -m scripts.generate_outputs \
     --datasets red_team_chat \
     --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
-    --num-gpus 2 \
-    --n-total 20 \
-    --batch-size 20 \
+    --num-gpus 4 \
+    --n-total 5000 \
+    --batch-size 1000 \
     --seed 42 \
     --embed
 
 # generate with flan-t5
-python -m scripts.generate_outputs \
+echo "Generating red_team_chat with flan-t5-xxl"
+python -u -m scripts.generate_outputs \
     --datasets red_team_chat \
-    --model-name-or-path google/flan-t5-xl \
+    --model-name-or-path google/flan-t5-xxl \
     --num-gpus 1 \
     --print-container-logs \
-    --n-total 20 \
-    --num-hypotheses 2 \
+    --n-total 2000 \
+    --num-hypotheses 50 \
     --seed 42
 
 # eval red_team_chat
-python -m scripts.compute_loss \
+echo "Evaluating red_team_chat"
+python -u -m scripts.compute_loss \
     --output-dir output \
     --datasets red_team_chat \
     --loss-fn weqweasdas/hh_rlhf_rm_open_llama_3b \
-    --batch-size 30 \
-    --eval-models google/flan-t5-xl
+    --batch-size 5 \
+    --eval-models google/flan-t5-xxl
  
 # mbpp tests
-python -m scripts.generate_outputs \
+echo "Generating mbpp with codellama/CodeLlama-7b-Instruct-hf"
+python -u -m scripts.generate_outputs \
     --datasets mbpp \
     --model-name-or-path codellama/CodeLlama-7b-Instruct-hf \
     --num-gpus 1 \
     --print-container-logs \
-    --n-total 20 \
-    --num-hypotheses 2 \
-    --num-return-sequences 2 \
+    --n-total 1000 \
+    --num-hypotheses 50 \
+    --num-return-sequences 10 \
     --seed 42 \
     --do-sample
 
 # eval mbpp
-python -m scripts.compute_loss \
+echo "Evaluating mbpp"
+python -u -m scripts.compute_loss \
     --output-dir output \
     --datasets mbpp \
     --loss-fn pass@k
 
-# meqsum tests
-python -m scripts.generate_outputs \
+# meqsum 7b
+echo "Generating meqsum with tiiuae/falcon-7b-instruct"
+python -u -m scripts.generate_outputs \
     --datasets bigbio/meqsum \
     --model-name-or-path tiiuae/falcon-7b-instruct \
-    --num-gpus 1 \
+    --num-gpus 4 \
     --print-container-logs \
-    --n-total 20 \
-    --num-hypotheses 2 \
+    --n-total 2000 \
+    --num-hypotheses 50 \
+    --seed 42
+
+echo "Generating meqsum with tiiuae/falcon-40b-instruct"
+python -u -m scripts.generate_outputs \
+    --datasets bigbio/meqsum \
+    --model-name-or-path tiiuae/falcon-40b-instruct \
+    --num-gpus 4 \
+    --print-container-logs \
+    --n-total 2000 \
+    --num-hypotheses 50 \
     --seed 42
 
 # eval meqsum
-python -m scripts.compute_loss \
+echo "Evaluating meqsum"
+python -u -m scripts.compute_loss \
     --output-dir output \
     --datasets bigbio/meqsum \
     --loss-fn rouge
 
 # cnn_dailymail tests
 # embed
+echo "Embedding cnn_dailymail"
 python -u -m scripts.generate_outputs \
     --datasets cnn_dailymail \
     --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
     --num-gpus 2 \
-    --n-total 20 \
-    --batch-size 20 \
+    --n-total 5000 \
+    --batch-size 200 \
     --seed 42 \
     --embed
 
 # generate with llama 2
-python -m scripts.generate_outputs \
+echo "Generating cnn_dailymail with meta-llama/Llama-2-7b-chat-hf"
+python -u -m scripts.generate_outputs \
     --datasets cnn_dailymail \
     --model-name-or-path meta-llama/Llama-2-7b-chat-hf \
-    --num-gpus 1 \
+    --num-gpus 4 \
     --print-container-logs \
-    --n-total 20 \
-    --num-hypotheses 2 \
+    --n-total 2000 \
+    --num-hypotheses 50 \
     --seed 42
 
 # eval cnn_dailymail
-python -m scripts.compute_loss \
+echo "Evaluating cnn_dailymail"
+python -u -m scripts.compute_loss \
     --output-dir output \
     --datasets cnn_dailymail \
     --loss-fn rouge
 
 # xsum tests
 # embed
+echo "Embedding xsum"
 python -u -m scripts.generate_outputs \
     --datasets xsum \
     --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
-    --num-gpus 2 \
-    --n-total 20 \
-    --batch-size 20 \
+    --num-gpus 4 \
+    --n-total 5000 \
+    --batch-size 200 \
     --seed 42 \
     --embed
 
 # generate with llama 2
-python -m scripts.generate_outputs \
+echo "Generating xsum with meta-llama/Llama-2-7b-chat-hf"
+python -u -m scripts.generate_outputs \
     --datasets xsum \
     --model-name-or-path meta-llama/Llama-2-7b-chat-hf \
-    --num-gpus 1 \
+    --num-gpus 4 \
     --print-container-logs \
-    --n-total 20 \
-    --num-hypotheses 2 \
+    --n-total 2000 \
+    --num-hypotheses 50 \
     --seed 42
 
 # eval xsum
-python -m scripts.compute_loss \
+echo "Evaluating xsum"
+python -u -m scripts.compute_loss \
     --output-dir output \
     --datasets xsum \
     --loss-fn rouge
