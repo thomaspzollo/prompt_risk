@@ -78,12 +78,17 @@ def start_server(args):
         command.extend(["--quantize", "bitsandbytes"])
         container_name += "-quantized"
 
-    # if name already in use, remove it
+    # remove any running containers
     try:
-        container = client.containers.get(container_name)
-        container.remove(force=True)
-    except docker.errors.NotFound:
+        for container in client.containers.list():
+            logging.info(f"Found existing container {container.name}, removing...")
+            container.stop()
+            container.remove(force=True)
+        # remove container if name in use
+        client.containers.get(container_name).remove(force=True)        
+    except:
         pass
+
 
     # gpu list
     gpu_list = [str(i) for i in range(args.num_gpus)]

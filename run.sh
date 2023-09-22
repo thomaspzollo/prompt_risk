@@ -64,26 +64,6 @@ python -u -m scripts.compute_loss \
     --loss-fn weqweasdas/hh_rlhf_rm_open_llama_3b \
     --batch-size 5 \
     --eval-models google/flan-t5-xxl
- 
-# mbpp tests
-echo "Generating mbpp with codellama/CodeLlama-7b-Instruct-hf"
-python -u -m scripts.generate_outputs \
-    --datasets mbpp \
-    --model-name-or-path codellama/CodeLlama-7b-Instruct-hf \
-    --num-gpus $NUM_GPUS \
-    --print-container-logs \
-    --n-total 1000 \
-    --num-hypotheses 30 \
-    --num-return-sequences 5 \
-    --seed 42 \
-    --do-sample
-
-# eval mbpp
-echo "Evaluating mbpp"
-python -u -m scripts.compute_loss \
-    --output-dir output \
-    --datasets mbpp \
-    --loss-fn pass@k
 
 # cnn_dailymail tests
 # embed
@@ -173,3 +153,23 @@ python -u -m scripts.generate_outputs \
     --n-total 2000 \
     --num-hypotheses 50 \
     --seed 42
+
+# mbpp tests <-- this has bugs and I don't know why yet
+echo "Generating mbpp with codellama/CodeLlama-7b-Instruct-hf"
+python -u -m scripts.generate_outputs \
+    --datasets mbpp \
+    --model-name-or-path codellama/CodeLlama-7b-Instruct-hf \
+    --num-gpus $NUM_GPUS \
+    --print-container-logs \
+    --n-total 1000 \
+    --num-hypotheses 30 \
+    --num-return-sequences 5 \
+    --seed 42 \
+    --do-sample
+
+# eval mbpp
+echo "Evaluating mbpp"
+python -u -m scripts.compute_loss \
+    --output-dir output \
+    --datasets mbpp \
+    --loss-fn pass@k

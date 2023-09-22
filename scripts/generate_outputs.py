@@ -454,7 +454,9 @@ def tgi_prediction_pipeline(dataset, cache_df, args):
     # merge the metadata back in, assuming the metadata is the same for all examples
     cols = list(dataset[0].keys())
     # only retain columns not already in the df
-    cols =  ['id'] + [col for col in cols if col not in df.columns]
+    cols =  [col for col in cols if col not in df.columns]
+    if 'id' not in cols:
+        cols = ['id'] + cols
     meta_df = pd.DataFrame(dataset)[cols]
     df = df.merge(meta_df, on='id')
     col_order = ['id', 'text', 'generated_text']
@@ -551,8 +553,8 @@ def generate_outputs(args, save_folder, model_name):
             print(f'Token distribution for dataset {args.dataset}:')
             print(stats)
     print(f"Max length across all prompts in datasets: {max_len:,}")
-    # set max_input_tokens to max length + 100 to account for special tokens and any variation in prompts
-    args.max_input_length = max_len + 100
+    # set max_input_tokens to max length + 10 to account for special tokens and any variation in prompts
+    args.max_input_length = max_len + 10
     # set max_total_tokens min of 3x max_input_tokens and 4096
     args.max_total_tokens = min(args.max_input_length * 3, 4096)
     args.max_new_tokens = args.max_total_tokens - args.max_input_length
@@ -573,11 +575,12 @@ def generate_outputs(args, save_folder, model_name):
             new_max = args.max_input_length + 512
             print(f"Warning: max input length of {args.max_input_length:,} leaves little (or no) room for generation. Increasing max_total_tokens to {new_max:,} with RoPE scaling.")
             args.max_total_tokens = new_max
+            args.max_new_tokens = args.max_total_tokens - args.max_input_length
             args.rope_scaling = 'dynamic'
             args.rope_factor = new_max / 4096
             # was gettting error: ArgumentValidation("`max_batch_prefill_tokens` must be >= `max_input_length`. Given: 4096 and 4874")
             # so set max_batch_prefill_tokens to max_input_length
-            args.max_batch_prefill_tokens = args.max_input_length
+            args.max_batch_prefill_tokens = args.max_input_length*2
     # start the text-generation-inference server with the specified model
     container = start_server(args)
     # get the max batch size

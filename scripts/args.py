@@ -80,6 +80,8 @@ def parse_args(passed_args=None, known_only=False):
     parser.add_argument('--num-return-sequences', type=int, default=1, help='Number of sequences to return from the server. While TGI doesn\'t implement this, we simulate this by calling the server multiple times with different random seeds.')
     parser.add_argument('--s3-bucket-name', type=str, default='prompt-risk-control', help='S3 bucket name to upload to.')
     parser.add_argument('--s3-prefix', type=str, default='', help='S3 prefix to upload to.')
+    parser.add_argument('--download-from-s3', action='store_true', default=False, help='Download from S3.')
+    parser.add_argument('--upload-to-s3', action='store_true', default=False, help='Upload to S3.')
     if passed_args is not None:
         if known_only:
             args, unknown_args = parser.parse_known_args(passed_args)
