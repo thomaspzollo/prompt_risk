@@ -70,6 +70,8 @@ def start_server(args):
         command.extend(["--rope-scaling", str(args.rope_scaling)])
     if 'rope_factor' in args:
         command.extend(["--rope-factor", str(args.rope_factor)])
+    if 'max_batch_prefill_tokens' in args:
+        command.extend(["--max-batch-prefill-tokens", str(args.max_batch_prefill_tokens)])
     model_id_clean = model_id.replace("/", "-")
     container_name = f"text-generation-inference-{model_id_clean}-{num_shard}"
     if args.container_quantize:

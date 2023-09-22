@@ -469,6 +469,13 @@ def tgi_prediction_pipeline(dataset, cache_df, args):
 def embed(args, save_folder, model_name):
     # load the dataset
     dataset, _ = get_data(args, instruction=None)
+    # check if we've already computed the embeddings
+    csv_path = os.path.join(save_folder, f'{model_name}_embeddings.csv')
+    if os.path.exists(csv_path) and not args.no_cache:
+        cache_df = pd.read_csv(csv_path)
+        if len(cache_df) == len(dataset):
+            print(f"Embeddings for {model_name} already computed for dataset {args.dataset}. Skipping.")
+            return
     
     # TODO: keep track of what we've already computed
     # though this might be so fast that it doesn't matter if we recompute
@@ -557,7 +564,8 @@ def generate_outputs(args, save_folder, model_name):
         # set max batch total tokens manually because TGI won't do it automatically for T5 models
         # this was set somewhat experimentally
         args.max_concurrent_requests = 200
-        args.max_batch_total_tokens = min(args.max_total_tokens*args.max_concurrent_requests, 50_000)
+        max_tokens = (args.num_gpus // 4) * 50_000
+        args.max_batch_total_tokens = min(args.max_total_tokens*args.max_concurrent_requests, max_tokens)
     if 'lama' in args.model_name_or_path:
         # may need to increase max length for particularly long prompts
         # see https://huggingface.co/docs/text-generation-inference/basic_tutorials/preparing_model
@@ -567,6 +575,9 @@ def generate_outputs(args, save_folder, model_name):
             args.max_total_tokens = new_max
             args.rope_scaling = 'dynamic'
             args.rope_factor = new_max / 4096
+            # was gettting error: ArgumentValidation("`max_batch_prefill_tokens` must be >= `max_input_length`. Given: 4096 and 4874")
+            # so set max_batch_prefill_tokens to max_input_length
+            args.max_batch_prefill_tokens = args.max_input_length
     # start the text-generation-inference server with the specified model
     container = start_server(args)
     # get the max batch size
