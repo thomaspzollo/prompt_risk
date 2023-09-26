@@ -22,6 +22,12 @@ Examples:
         --output-dir output \
         --datasets cnn_dailymail \
         --loss-fn rouge
+    
+    $ python -m scripts.compute_loss \
+        --output-dir output \
+        --datasets cnn_dailymail \
+        --loss-fn bertscore \
+        --batch-size 400
 """
 import math
 import os
@@ -88,6 +94,13 @@ def compute_chat_loss(df, reward_model_pipeline, args):
         ids = list(range(len(dataset)))
         dataset = dataset.add_column('task_id', ids)
         dataset = subset_ensure_unique(dataset, n_total=None, text_col_name='rejected')
+        # supplement with train dataset
+        train_dataset = load_dataset("Anthropic/hh-rlhf")["train"]
+        # create an id column ranging from len(dataset) to len(dataset) + len(train_dataset)
+        ids = list(range(len(dataset), len(dataset) + len(train_dataset)))
+        train_dataset = train_dataset.add_column('task_id', ids)
+        train_dataset = subset_ensure_unique(train_dataset, n_total=None, text_col_name='rejected')
+        dataset = concatenate_datasets([dataset, train_dataset])
         dataset = dataset.map(lambda x: {'human_input': extract_user_portion(x['rejected'])}, batched=False)
         label_df = dataset.to_pandas()[['task_id', 'human_input']]
     elif args.dataset == 'red_team_chat':
@@ -207,6 +220,14 @@ def score_meqsum_predictions(df, scorer):
     return df
 
 def score_summarization_predictions(df, scorer, dataset='cnn_dailymail'):
+    # if we've already computed scores, skip
+    if scorer.name == 'rouge' and 'rougeL' in df.columns and (df['rougeL'].isna().sum() == 0):
+        print(f"rougeL already computed for {df.shape[0]} rows in {dataset}. Skipping.")
+        return df
+    if scorer.name == 'bert_score' and 'bertscore_f1' in df.columns and (df['bertscore_f1'].isna().sum() == 0):
+        print(f"bertscore already computed for {df.shape[0]} rows in {dataset}. Skipping.")
+        return df
+    
     # load reference summaries
     if dataset == 'cnn_dailymail':
         dataset = load_dataset('cnn_dailymail', name='3.0.0', split='train')
@@ -225,13 +246,28 @@ def score_summarization_predictions(df, scorer, dataset='cnn_dailymail'):
     df = df.merge(label_df, on="task_id", how="left")
     assert len(df) == original_len, f"Expected {original_len} rows, got {len(df)} rows"
     assert df['summary'].isna().sum() == 0, "Some rows are missing human input"
-    rouge_scores = scorer.compute(predictions=df['generated_text'].tolist(), references=df['summary'].tolist(), use_aggregator=False)
-    # extract rougeL scores
-    rougeL_scores = rouge_scores['rougeL']
-    # add rougeL scores to df
-    df['rougeL'] = rougeL_scores
+    # compute rouge scores
+    if scorer.name == 'rouge':
+        rouge_scores = scorer.compute(predictions=df['generated_text'].tolist(), references=df['summary'].tolist(), use_aggregator=False)
+        # extract rougeL scores
+        rougeL_scores = rouge_scores['rougeL']
+        # add rougeL scores to df
+        df['rougeL'] = rougeL_scores
+    # compute bertscore
+    if scorer.name == 'bert_score':
+        start = time.time()
+        bert_scores = scorer.compute(predictions=df['generated_text'].tolist(), references=df['summary'].tolist(), device=args.device, lang='en', batch_size=args.batch_size)
+        end = time.time()
+        print(f"Time to compute bertscore for {len(df):,} rows: {end-start:.2f} seconds. Average time per example: {(end-start)/len(df):.2f} seconds.")
+        # extract bertscore scores
+        bert_scores_df = pd.DataFrame(bert_scores).rename(columns={'f1': 'bertscore_f1', 'precision': 'bertscore_precision', 'recall': 'bertscore_recall', 'hashcode': 'bertscore_hashcode'})
+        # add bertscore scores to df
+        df = pd.concat([df, bert_scores_df], axis=1)
+
     # drop 'summary' column
     df = df.drop(columns=['summary'], errors='ignore')
+
+    # score with 
     return df
 
 
@@ -300,8 +336,11 @@ def main(args):
                 scorer = get_scorer(args)
                 dfs[model_id] = score_summarization_predictions(dfs[model_id], scorer, dataset=args.dataset)
                 scorer = None
-                print(f'Average rougeL score on {args.dataset} - {model_id}: {dfs[model_id]["rougeL"].mean():.4f}')
-
+                if 'rougeL' in dfs[model_id].columns:
+                    print(f'Average rougeL score on {args.dataset} - {model_id}: {dfs[model_id]["rougeL"].mean():.4f}')
+                if 'bertscore_f1' in dfs[model_id].columns:
+                    print(f'Average bertscore_f1 score on {args.dataset} - {model_id}: {dfs[model_id]["bertscore_f1"].mean():.4f}')
+            
             # save back to the same file
             dfs[model_id].to_csv(os.path.join(args.output_dir, dataset_dir, f"{model_id}_predictions.csv"), index=False)
 

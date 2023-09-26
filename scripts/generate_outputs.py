@@ -64,7 +64,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForSeq2SeqLM,
                         AutoTokenizer)
 
-from prompt_risk.instructions import instruction_sets, MEQSUM_PROMPT_FILES
+from prompt_risk.instructions import instruction_sets, MEQSUM_PROMPT_FILES, chosen_hypotheses
 from .llama_utils import prepare_chats
 from .args import parse_args as scripts_parse_args
 from tgi.args import parse_args as tgi_parse_args
@@ -72,6 +72,7 @@ from tgi.call_server import get_batch_size, make_predictions
 from tgi.docker_utils import set_hf_token, start_server, stop_server
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 
 def select_k_shot_examples(k=3, n=50, idx_start=1, idx_end=11):
@@ -117,7 +118,11 @@ def create_hypotheses(args, instruction_set, k_shot_idx_start=0, k_shot_idx_end=
 
 def get_instructions(args, instruction_sets):
     if args.dataset in ["xsum", "cnn_dailymail"]:
-        # convert to dictionaries for consistency with other datasets
+        if args.use_chosen_hypotheses:
+            print("Using chosen hypotheses.")
+            instructions = chosen_hypotheses["summarization"]
+            instructions = [{'instruction': ins} for ins in instructions]
+            return instructions
         instructions = [{'instruction': ins} for ins in instruction_sets["summarization"]]
         return instructions
     elif args.dataset in ['bigbio/meqsum']:
@@ -125,6 +130,11 @@ def get_instructions(args, instruction_sets):
         instructions = create_hypotheses(args, instruction_set, k_shot_idx_start=0, k_shot_idx_end=len(MEQSUM_PROMPT_FILES))
         return instructions
     elif args.dataset in ["red_team_chat", "full_chat"]:
+        if args.use_chosen_hypotheses:
+            print("Using chosen hypotheses.")
+            instructions = chosen_hypotheses["chat"]
+            instructions = [{'instruction': ins} for ins in instructions]
+            return instructions
         return [{'instruction': ins} for ins in instruction_sets["chat"]]
     elif args.dataset in ["mbpp", "human_eval"]:
         # return a list of dicts containing prompts and chosen k-shot examples
@@ -290,6 +300,15 @@ def get_data(args, instruction=None):
         ids = list(range(len(dataset)))
         dataset = dataset.add_column('task_id', ids)
         dataset = subset_ensure_unique(dataset, args.n_total, text_col_name='rejected')
+        # we may need more than what's available in the test set, so we'll use the train set as well
+        if len(dataset) < args.n_total:
+            print(f'Warning: only {len(dataset):,} examples available in the test set. Using train set to supplement with {args.n_total - len(dataset):,} additional examples.')
+            train_dataset = load_dataset("Anthropic/hh-rlhf")["train"]
+            # create an id column ranging from len(dataset) to len(dataset) + len(train_dataset)
+            ids = list(range(len(dataset), len(dataset) + len(train_dataset)))
+            train_dataset = train_dataset.add_column('task_id', ids)
+            train_dataset = subset_ensure_unique(train_dataset, args.n_total - len(dataset), text_col_name='rejected')
+            dataset = concatenate_datasets([dataset, train_dataset])
         # if embed only, extract user portion of the chat
         if args.embed:
             dataset = dataset.map(lambda x: {'text': extract_user_portion(x['rejected'])}, batched=False)
@@ -420,7 +439,7 @@ def get_datasets_dataloaders(instructions, cache_df, args, return_dataloaders=Fa
         if not cache_df.empty:
             # assume all examples have the same columns
             cols = list(dataset[0].keys())
-            if 'hash' not in cache_df.columns:
+            if 'hash' not in cache_df.columns or cache_df['hash'].isna().any():
                 cache_df['hash'] = cache_df.apply(lambda x: hash_row(x, cols), axis=1)
             hash_vals = set(cache_df['hash'].values)
             num_examples = len(dataset)
@@ -433,7 +452,7 @@ def get_datasets_dataloaders(instructions, cache_df, args, return_dataloaders=Fa
                     final_dataset.append(dataset[i])
             dataset = final_dataset
             print(f"Skipping {num_examples - len(dataset)}/{num_examples} examples that were already run.")
-            
+        
         datasets.append(dataset)
         if return_dataloaders:
             dataloaders.append(dataloader)

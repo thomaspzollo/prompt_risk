@@ -72,6 +72,10 @@ To run all experiments + evaluations, run:
 nohup ./run.sh \
 > run.log 2>&1 &
 ```
+```bash
+nohup ./run_chosen_hyps.sh \
+> run_chosen_hyps.log 2>&1 &
+```
 
 Run Red Team Chat on Flan-T5:
 ```bash

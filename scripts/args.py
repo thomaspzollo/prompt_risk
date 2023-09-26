@@ -82,6 +82,7 @@ def parse_args(passed_args=None, known_only=False):
     parser.add_argument('--s3-prefix', type=str, default='', help='S3 prefix to upload to.')
     parser.add_argument('--download-from-s3', action='store_true', default=False, help='Download from S3.')
     parser.add_argument('--upload-to-s3', action='store_true', default=False, help='Upload to S3.')
+    parser.add_argument('--use-chosen-hypotheses', action='store_true', default=False, help='Use the chosen hypotheses instead of randomly sampling.')
     if passed_args is not None:
         if known_only:
             args, unknown_args = parser.parse_known_args(passed_args)
