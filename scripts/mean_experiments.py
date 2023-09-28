@@ -9,6 +9,7 @@ from torch.utils.data import TensorDataset
 import crossprob
 import torch
 from bisect import bisect_left
+import random
 
 from prompt_risk.methods import (
     DKW,
@@ -30,14 +31,14 @@ def load_loss(args):
     load_folder = "../output/{}".format(
         dataset, 
     )
-    load_root = "{}/{}_model_{}_{}_loss_dist.pkl".format(
+    load_root = "{}/{}_{}_{}_loss_dist.pkl".format(
         load_folder,
         dataset, 
         model_size, 
         loss_fn
     )
     print("loading from", load_root)
-    
+
     with open(load_root, 'rb') as file:
         res = pkl.load(file)
 
@@ -52,6 +53,7 @@ def main(args):
     os.makedirs(output_dir, exist_ok = True)
 
     torch.manual_seed(args.seed)
+    random.seed(args.seed)
 
     bound_list = [
         Bound("KS", ks_bound),
@@ -59,15 +61,22 @@ def main(args):
     ] 
     methods = [
         LttHB,
-        RcpsWSR
+        # RcpsWSR
     ]
 
     instructions, loss = load_loss(args)
     args.num_hypotheses = loss.shape[0]
+    if args.single_prompt:
+        
+        p_ind = args.prompt_ind
+        instructions = instructions[p_ind:p_ind+1]
+        loss = loss[p_ind:p_ind+1, :]
+        args.num_hypotheses = 1
 
+    print("instruction:", instructions[0])
     print("loss shape", loss.shape)
 
-    save_string = "{}_{}_mean_no_data_{}".format(args.dataset, args.loss_fn, args.num_val_datapoints)
+    save_string = "{}_{}_mean_no_data_{}_prompt_ind_{}".format(args.dataset, args.loss_fn, args.num_val_datapoints, args.prompt_ind)
     print(save_string)
 
     method_dict = OrderedDict([(method.__name__, method) for method in methods])
@@ -120,10 +129,19 @@ def main(args):
 
             trial_results.append((trial_idx, method_name, mean_alpha, mean_loss))
 
+        hb = float(torch.mean(X[0]) + np.sqrt((1/(2*X[0].shape[0]))*np.log(1/args.delta)))
+        trial_results.append((trial_idx, "Hoeffding", hb, mean_loss))
+
+        hb = float(torch.mean(X[0]) + np.sqrt((1/(2*X[0].shape[0]))*np.log(1/args.delta)))
+        trial_results.append((trial_idx, "Hoeffding", hb, mean_loss))
+
+        # mb = float(torch.mean(X[0]) + 2/(1-args.delta))
+        # trial_results.append((trial_idx, "Markov", mb, mean_loss))
+
     results_df = pd.DataFrame(trial_results, columns=["trial", "method", "alpha", "mean loss"])
     average_df = results_df.drop(columns="trial").groupby(["method"]).mean()
     if args.save_csv:
-        print("saving df to csv...")
+        print("saving df to csv using save string", save_string)
         results_df.to_csv("{}/{}_full_results.csv".format(output_dir, save_string))
         average_df.to_csv("{}/{}.csv".format(output_dir, save_string))
         args_dict = vars(args)
@@ -150,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_val_datapoints",
         type=int,
-        default=1000,
+        default=500,
         help="number of validation points",
     )
     parser.add_argument(
@@ -160,24 +178,32 @@ if __name__ == "__main__":
         help="acceptable probability of error (default: 0.05)",
     )
     parser.add_argument(
+        "--single_prompt",
+        action="store_true",
+        help="just use one prompt for bound comparison"
+    )
+    parser.add_argument(
+        "--prompt_ind",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
         "--save_csv",
         action="store_true",
         help="store results"
     )
     parser.add_argument(
         "--dataset",
-        default="red_team_chat",
+        default="mbpp",
         help="dataset for experiments"
     )
     parser.add_argument(
         "--model_size",
-        default="base",
-        help="dataset for experiments"
+        default="codellama",
     )
     parser.add_argument(
         "--loss_fn",
-        default="toxicity",
-        help="dataset for experiments"
+        default="pass-10",
     )
     args = parser.parse_args()
     main(args)
