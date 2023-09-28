@@ -3,6 +3,39 @@ NUM_GPUS=4
 N_TOTAL=8000
 NUM_HYPOTHESES=20
 
+# red_team_chat tests
+# embed
+echo "Embedding red_team_chat"
+python -u -m scripts.generate_outputs \
+    --datasets red_team_chat \
+    --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
+    --num-gpus $NUM_GPUS \
+    --n-total 40000 \
+    --batch-size 1000 \
+    --seed 42 \
+    --embed
+
+# generate with flan-t5
+echo "Generating red_team_chat with flan-t5-xxl"
+python -u -m scripts.generate_outputs \
+    --datasets red_team_chat \
+    --model-name-or-path google/flan-t5-xxl \
+    --num-gpus $NUM_GPUS \
+    --print-container-logs \
+    --n-total 40000 \
+    --num-hypotheses 2 \
+    --seed 42 \
+    --use-chosen-hypotheses
+
+# eval red_team_chat
+echo "Evaluating red_team_chat"
+python -u -m scripts.compute_loss \
+    --output-dir output \
+    --datasets red_team_chat \
+    --loss-fn weqweasdas/hh_rlhf_rm_open_llama_3b \
+    --batch-size 5 \
+    --eval-models google/flan-t5-xxl
+
 # full_chat tests
 # embed
 echo "Embedding full_chat"
@@ -23,7 +56,7 @@ python -u -m scripts.generate_outputs \
     --num-gpus $NUM_GPUS \
     --print-container-logs \
     --n-total 40000 \
-    --num-hypotheses 1 \
+    --num-hypotheses 2 \
     --seed 42 \
     --use-chosen-hypotheses
 
@@ -32,39 +65,6 @@ echo "Evaluating full_chat"
 python -u -m scripts.compute_loss \
     --output-dir output \
     --datasets full_chat \
-    --loss-fn weqweasdas/hh_rlhf_rm_open_llama_3b \
-    --batch-size 5 \
-    --eval-models google/flan-t5-xxl
-
-# red_team_chat tests
-# embed
-echo "Embedding red_team_chat"
-python -u -m scripts.generate_outputs \
-    --datasets red_team_chat \
-    --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
-    --num-gpus $NUM_GPUS \
-    --n-total $N_TOTAL \
-    --batch-size 1000 \
-    --seed 42 \
-    --embed
-
-# generate with flan-t5
-echo "Generating red_team_chat with flan-t5-xxl"
-python -u -m scripts.generate_outputs \
-    --datasets red_team_chat \
-    --model-name-or-path google/flan-t5-xxl \
-    --num-gpus $NUM_GPUS \
-    --print-container-logs \
-    --n-total $N_TOTAL \
-    --num-hypotheses $NUM_HYPOTHESES \
-    --seed 42 \
-    --use-chosen-hypotheses
-
-# eval red_team_chat
-echo "Evaluating red_team_chat"
-python -u -m scripts.compute_loss \
-    --output-dir output \
-    --datasets red_team_chat \
     --loss-fn weqweasdas/hh_rlhf_rm_open_llama_3b \
     --batch-size 5 \
     --eval-models google/flan-t5-xxl
