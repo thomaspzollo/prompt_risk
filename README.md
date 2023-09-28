@@ -1,12 +1,12 @@
 # Prompt Risk Control
-Prompt risk control is a framework for selecting prompts that minimize a risk criterion (e.g., error rate, toxicity, etc.). This framework accounts for more than just empirical average performance on a validation set when selecting a prompt. It takes into account the worst-case performance of a prompt through the use of metrics like conditional value at risk (CVaR). While problematic generations are rare for many language models, they can be catastrophic in real-world applications. This framework allows users to select prompts that minimize the risk of such generations.
+Prompt Risk Control (PRC) is a framework for selecting prompts that minimize a risk criterion (e.g., error rate, toxicity, etc.). This framework accounts for more than just empirical average performance on a validation set when selecting a prompt. It takes into account the worst-case performance of a prompt through the use of metrics like conditional value at risk (CVaR). While problematic generations are rare for many language models, they can be catastrophic in real-world applications. This framework allows users to select prompts that minimize the risk of such generations.
 
 ## Environment Setup
 To install the dependencies, run the following command:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt --no-deps
 ```
 
 Installing crossprob requires a bit of manual effort. First, clone the repository:
@@ -38,8 +38,27 @@ Finally, login to the HuggingFace hub with `huggingface-cli login` and enter you
 
 Install Docker with NVIDIA support, if necessary, following the instructions [here](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#setting-up-docker).
 
-## Manually running a text-generation-inference server
+## Make predictions for experiments
+A useful starting point is to run `smoke_test.sh` to ensure everything is working properly. This will check that all model and dataset combinations are working as expected with a small amount of data.
+```bash
+./smoke_test.sh
 ```
+
+Next we ramp up our pipeline output in waves. Note that the pipeline won't repeat work so we can build on our output incrementally. We ran `run.sh` to generate a moderate amount of output for all experiments of interest.
+```bash
+nohup ./run.sh \
+> run.log 2>&1 &
+```
+
+Finally, we scale up in a few key places such as on the Anthropic datasets.
+```bash
+nohup ./run_chosen_hyps.sh \
+> run_chosen_hyps.log 2>&1 &
+```
+
+### Debugging
+You may find that that you need to debug the Docker component of the pipeline. To manually run a container, run:
+```bash
 HUGGING_FACE_HUB_TOKEN=$(cat ~/.cache/huggingface/token)
 model=meta-llama/Llama-2-7b-hf
 model=google/flan-t5-xxl
@@ -59,114 +78,40 @@ docker run \
         --dtype float16
 ```
 
-Benchmark and tune TGI to maximize throughput (optional):
-```bash
-docker-compose up -d
-docker-compose exec benchmark /bin/bash
-text-generation-benchmark --sequence-length 2048 --decode-length 200 --runs 5 --batch-size 4
-```
-
-## Make predictions
-To run all experiments + evaluations, run:
-```bash
-nohup ./run.sh \
-> run.log 2>&1 &
-```
-```bash
-nohup ./run_chosen_hyps.sh \
-> run_chosen_hyps.log 2>&1 &
-```
-
-Run Red Team Chat on Flan-T5:
+To run a specific experiment, take a look at the `run.sh` script for examples of how to run the pipeline for a specific model and dataset. Here's a sample command:
 ```bash
 nohup python -u -m scripts.generate_outputs \
-    --datasets red_team_chat full_chat \
-    --use_tgi \
+    --datasets full_chat \
     --model-name-or-path google/flan-t5-xxl \
     --num-gpus 4 \
-    --server-port 8081 \
-    --dtype float16 \
     --print-container-logs \
-    --n_total 2000 \
-    --num_hypotheses 50 \
-> generate_outputs.log 2>&1 &
-```
-
-Run Code Llama on MBPP:
-```bash
-nohup python -u -m scripts.generate_outputs \
-    --datasets mbpp \
-    --use-tgi \
-    --model-name-or-path codellama/CodeLlama-7b-Instruct-hf \
-    --num-gpus 1 \
-    --server-port 8081 \
-    --dtype float16 \
-    --print-container-logs \
-    --n-total 300 \
-    --num-hypotheses 20 \
-    --num-return-sequences 10 \
-    --seed 42 \
-    --do-sample \
-> generate_outputs.log 2>&1 &
-```
-
-Run MeQSum on Falcon 7b:
-```bash
-nohup python -u -m scripts.generate_outputs \
-    --datasets bigbio/meqsum \
-    --use-tgi \
-    --model-name-or-path tiiuae/falcon-7b-instruct \
-    --num-gpus 1 \
-    --server-port 8081 \
-    --dtype float16 \
-    --print-container-logs \
-    --n-total 1000 \
-    --num-hypotheses 50 \
-    --seed 42 \
-> generate_outputs.log 2>&1 &
-```
-Generate embeddings for full_chat/red_team_chat:
-```bash
-# red_team_chat
-python -u -m scripts.generate_outputs \
-    --datasets full_chat \
-    --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
-    --num-gpus 2 \
     --n-total 2000 \
-    --batch-size 1000 \
-    --seed 42 \
-    --embed
-```
-Generate embeddings for CNN Daily Mail corpus:
-```bash
-python -u -m scripts.generate_outputs \
-    --datasets cnn_dailymail \
-    --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
-    --num-gpus 2 \
-    --n-total 10000 \
-    --batch-size 1000 \
-    --seed 42 \
-    --embed
+    --num-hypotheses 50 \
+    --seed 42
+> generate_outputs.log 2>&1 &
 ```
 
-Generate embeddings for XSUM:
+## Analyze results
+For section 5.1 of the paper we run the following notebooks in the notebooks directory:
 ```bash
-python -u -m scripts.generate_outputs \
-    --datasets xsum \
-    --model-name-or-path sentence-transformers/multi-qa-mpnet-base-dot-v1 \
-    --num-gpus 2 \
-    --n-total 10000 \
-    --batch-size 1000 \
-    --seed 42 \
-    --embed
+code_score_pass_10.ipynb
+mean_experiments.py with params "--single_prompt prompt_ind 0" and "--single_prompt prompt_ind 2"
+code_bnd_cmps_exp.ipynb
+```
+For section 5.2 we run the following notebooks in the notebooks directory:
+```bash
+chat_score_tox.ipynb
+chat_var_exp.ipynb
+chat_dist_shift_exp.ipynb
 ```
 
-## Upload outputs to S3
-First configure your AWS credentials with `aws configure`. Follow [these instructions](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html#cliv2-linux-install) if you need to install the aws CLI.
-
-Then run:
+For section 5.3 we run the following notebooks in the notebooks directory:
 ```bash
-python -m scripts.upload_to_s3 \
-    --output-dir ./output \
-    --s3-bucket-name prompt-risk-control \
+meqsum_gini_exp.ipynb
+```
+
+## Package up results
+To package up the results for submission, run the following command:
+```bash
+./package_results.sh
 ```

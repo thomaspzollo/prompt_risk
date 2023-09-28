@@ -1,4 +1,0 @@
-python produce_loss_dist.py --dataset="red_team_chat" --loss_fn="toxicity" --model_size="small" --num_hypotheses=50 --batch_size=256 --device="cuda:1";
-python produce_loss_dist.py --dataset="red_team_chat" --loss_fn="toxicity" --model_size="base" --num_hypotheses=50 --batch_size=256 --device="cuda:1";
-python produce_loss_dist.py --dataset="red_team_chat" --loss_fn="toxicity" --model_size="large" --num_hypotheses=50 --batch_size=128 --device="cuda:1";
-python produce_loss_dist.py --dataset="red_team_chat" --loss_fn="toxicity" --model_size="XL" --num_hypotheses=50 --batch_size=32 --device="cuda:1";
