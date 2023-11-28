@@ -1,4 +1,9 @@
 # Prompt Risk Control
+
+Code accompanying *Prompt Risk Control: A Rigorous Framework for Responsible Deployment of Large Language Models*
+
+<a href="https://arxiv.org/abs/2311.13628">View paper on arXiv.</a>
+
 Prompt Risk Control (PRC) is a framework for selecting prompts that minimize a risk criterion (e.g., error rate, toxicity, etc.). This framework accounts for more than just empirical average performance on a validation set when selecting a prompt. It takes into account the worst-case performance of a prompt through the use of metrics like conditional value at risk (CVaR). While problematic generations are rare for many language models, they can be catastrophic in real-world applications. This framework allows users to select prompts that minimize the risk of such generations.
 
 ## Environment Setup
